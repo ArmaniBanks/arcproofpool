@@ -12,7 +12,8 @@ import { StateBadge, SubmissionBadge } from "@/components/StateBadge";
 import { TxStatus } from "@/components/TxStatus";
 
 export default function TaskPage({ params }: { params: { id: string } }) {
-  const taskId = BigInt(params.id);
+  const invalidTaskId = !/^\d+$/.test(params.id);
+  const taskId = invalidTaskId ? 0n : BigInt(params.id);
   const { address } = useAccount();
   const [proof, setProof] = useState("");
 
@@ -65,6 +66,10 @@ export default function TaskPage({ params }: { params: { id: string } }) {
       functionName: "submitProof",
       args: [taskId, proof]
     });
+  }
+
+  if (invalidTaskId) {
+    return <div className="panel p-6 text-sm text-zinc-400">Invalid task ID.</div>;
   }
 
   if (!task) {

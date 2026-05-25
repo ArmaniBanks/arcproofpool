@@ -13,7 +13,11 @@ export function formatUsdc(value?: bigint) {
 }
 
 export function parseUsdc(value: string) {
-  return parseUnits(value || "0", 6);
+  try {
+    return parseUnits(value || "0", 6);
+  } catch {
+    return 0n;
+  }
 }
 
 export function shortAddress(address?: Address | string) {
