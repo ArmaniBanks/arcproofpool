@@ -7,6 +7,7 @@ import { CONTRACTS } from "@/contracts.config";
 import { proofPoolAbi } from "@/lib/artifacts";
 import { derivedState, formatDate, formatUsdc, shortAddress } from "@/lib/format";
 import type { Task } from "@/lib/types";
+import { HowItWorks } from "@/components/HowItWorks";
 import { StateBadge } from "@/components/StateBadge";
 
 export default function MarketplacePage() {
@@ -84,6 +85,10 @@ export default function MarketplacePage() {
             />
           </label>
         </div>
+      </div>
+
+      <div className="panel p-6">
+        <HowItWorks />
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">

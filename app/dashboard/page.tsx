@@ -7,6 +7,7 @@ import { CONTRACTS } from "@/contracts.config";
 import { proofPoolAbi } from "@/lib/artifacts";
 import { derivedState, formatUsdc } from "@/lib/format";
 import type { Submission, Task } from "@/lib/types";
+import { HowItWorks } from "@/components/HowItWorks";
 import { StateBadge, SubmissionBadge } from "@/components/StateBadge";
 
 export default function DashboardPage() {
@@ -74,7 +75,14 @@ export default function DashboardPage() {
         {proofs.length === 0 && <div className="panel p-6 text-sm text-zinc-400">No submitted proofs for this wallet. Agent submissions and outcomes will collect here.</div>}
       </section>
 
-      {created.length === 0 && proofs.length === 0 && <DemoPathPrompt />}
+      {created.length === 0 && proofs.length === 0 && (
+        <div className="space-y-6">
+          <DemoPathPrompt />
+          <div className="panel p-6">
+            <HowItWorks compact />
+          </div>
+        </div>
+      )}
     </section>
   );
 }
