@@ -1,254 +1,196 @@
 "use client";
 
+import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useAccount, useChainId, useReadContract, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
-import { ARC_TESTNET, CONTRACTS } from "@/contracts.config";
-import { erc20Abi, proofPoolAbi } from "@/lib/artifacts";
-import { formatUsdc, parseUsdc } from "@/lib/format";
-import { FaucetHelper } from "@/components/FaucetHelper";
-import { getReadableTxError, TxStatus } from "@/components/TxStatus";
+import type { Address } from "viem";
+import { useAccount, useReadContract, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
+import { CONTRACTS } from "@/contracts.config";
+import { agentRegistryAbi, proofPoolAbi } from "@/lib/artifacts";
+import { derivedState, formatDate, formatUsdc, shortAddress } from "@/lib/format";
+import type { Submission, Task } from "@/lib/types";
+import { StateBadge, SubmissionBadge } from "@/components/StateBadge";
+import { TxStatus } from "@/components/TxStatus";
 
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-const DRAFT_STORAGE_KEY = "arcproofpool:create-task-draft";
+export default function TaskPage({ params }: { params: { id: string } }) {
+  const invalidTaskId = !/^\d+$/.test(params.id);
+  const taskId = invalidTaskId ? 0n : BigInt(params.id);
+  const { address } = useAccount();
+  const [proof, setProof] = useState("");
 
-export default function CreateTaskPage() {
-  const { address, isConnected } = useAccount();
-  const chainId = useChainId();
-  const [title, setTitle] = useState("Analyze suspicious Arc wallet activity");
-  const [description, setDescription] = useState("");
-  const [criteria, setCriteria] = useState("");
-  const [reward, setReward] = useState("5");
-  const [deadlineDate, setDeadlineDate] = useState("");
-  const [deadlineTime, setDeadlineTime] = useState("");
-  const [createAttempted, setCreateAttempted] = useState(false);
-  const [approveAttempted, setApproveAttempted] = useState(false);
-  const [draftHydrated, setDraftHydrated] = useState(false);
-
-  const rewardUnits = useMemo(() => parseUsdc(reward), [reward]);
-  const isWrongChain = Boolean(isConnected && chainId !== ARC_TESTNET.id);
-  const allowance = useReadContract({
-    address: CONTRACTS.usdc,
-    abi: erc20Abi,
-    functionName: "allowance",
-    args: [address || ZERO_ADDRESS, CONTRACTS.proofPool]
+  const taskRead = useReadContract({
+    address: CONTRACTS.proofPool,
+    abi: proofPoolAbi,
+    functionName: "getTask",
+    args: [taskId]
   });
-  const balance = useReadContract({
-    address: CONTRACTS.usdc,
-    abi: erc20Abi,
-    functionName: "balanceOf",
-    args: [address || ZERO_ADDRESS]
+  const submissionsRead = useReadContract({
+    address: CONTRACTS.proofPool,
+    abi: proofPoolAbi,
+    functionName: "getSubmissions",
+    args: [taskId]
   });
+  const registered = useReadContract({
+    address: CONTRACTS.agentRegistry,
+    abi: agentRegistryAbi,
+    functionName: "isRegistered",
+    args: [address || "0x0000000000000000000000000000000000000000"]
+  });
+  const hasSubmission = useReadContract({
+    address: CONTRACTS.proofPool,
+    abi: proofPoolAbi,
+    functionName: "hasSubmission",
+    args: [taskId, address || "0x0000000000000000000000000000000000000000"]
+  });
+
+  const submit = useWriteContract();
   const approve = useWriteContract();
-  const create = useWriteContract();
+  const reject = useWriteContract();
+  const close = useWriteContract();
+  const cancel = useWriteContract();
+  const submitReceipt = useWaitForTransactionReceipt({ hash: submit.data });
   const approveReceipt = useWaitForTransactionReceipt({ hash: approve.data });
-  const createReceipt = useWaitForTransactionReceipt({ hash: create.data });
+  const rejectReceipt = useWaitForTransactionReceipt({ hash: reject.data });
+  const closeReceipt = useWaitForTransactionReceipt({ hash: close.data });
+  const cancelReceipt = useWaitForTransactionReceipt({ hash: cancel.data });
 
-  const allowanceAmount = allowance.data as bigint | undefined;
-  const allowanceIsLoading = Boolean(isConnected && !isWrongChain && allowanceAmount === undefined && allowance.isLoading);
-  const hasAllowance = allowanceAmount !== undefined && allowanceAmount >= rewardUnits;
-  const usdcBalance = balance.data as bigint | undefined;
-  const hasBalance = usdcBalance !== undefined && usdcBalance >= rewardUnits;
-  const rewardLooksValid = /^\d+(\.\d{1,6})?$/.test(reward.trim()) && rewardUnits > 0n;
-  const deadlineDateTime = deadlineDate && deadlineTime ? new Date(`${deadlineDate}T${deadlineTime}`) : null;
-  const deadlineMs = deadlineDateTime?.getTime();
-  const deadlineIsValid = Boolean(deadlineMs && Number.isFinite(deadlineMs) && deadlineMs > Date.now());
-  const deadlineSeconds = deadlineIsValid ? BigInt(Math.floor((deadlineMs as number) / 1000)) : 0n;
+  const task = taskRead.data as Task | undefined;
+  const submissions = (submissionsRead.data || []) as Submission[];
+  const now = Math.floor(Date.now() / 1000);
+  const state = task ? derivedState(task.state, task.deadline, now) : 0;
+  const isOwner = Boolean(address && task && address.toLowerCase() === task.creator.toLowerCase());
+  const canSubmit = Boolean(address && task && registered.data && !hasSubmission.data && state === 0);
+  const canClose = Boolean(task && task.state === 0 && state === 1);
+  const submitInFlight = submit.isPending || submitReceipt.isLoading;
+  const approveInFlight = approve.isPending || approveReceipt.isLoading;
+  const rejectInFlight = reject.isPending || rejectReceipt.isLoading;
+  const closeInFlight = close.isPending || closeReceipt.isLoading;
+  const cancelInFlight = cancel.isPending || cancelReceipt.isLoading;
 
-  const fieldErrors = [
-    !title.trim() && "Title is required.",
-    !description.trim() && "Description is required.",
-    !criteria.trim() && "Acceptance criteria are required.",
-    !reward.trim() && "Reward is required.",
-    reward.trim() && !rewardLooksValid && "Reward must be greater than 0 with up to 6 USDC decimals.",
-    !deadlineDate && "Deadline date is required.",
-    !deadlineTime && "Deadline time is required.",
-    deadlineDate && deadlineTime && !deadlineIsValid && "Deadline must be a valid future date and time."
-  ].filter(Boolean) as string[];
-  const walletErrors = [
-    !isConnected && "Connect a wallet before creating a task.",
-    isWrongChain && `Switch to ${ARC_TESTNET.name} before sending transactions.`,
-    isConnected && !isWrongChain && usdcBalance === undefined && "USDC balance is still loading.",
-    isConnected && !isWrongChain && rewardLooksValid && usdcBalance !== undefined && !hasBalance && `Insufficient USDC balance. Wallet has ${formatUsdc(usdcBalance)} USDC.`
-  ].filter(Boolean) as string[];
-  const approvalErrors = [
-    ...fieldErrors,
-    ...walletErrors
-  ];
-  const createErrors = [
-    ...fieldErrors,
-    ...walletErrors,
-    allowanceIsLoading && "USDC approval status is still loading.",
-    rewardLooksValid && !hasAllowance && "USDC approval is missing. Complete Step 1 before creating the task."
-  ].filter(Boolean) as string[];
-
-  const canApprove = approvalErrors.length === 0 && !approve.isPending && !approveReceipt.isLoading;
-  const canCreate = createErrors.length === 0 && !create.isPending && !createReceipt.isLoading;
+  const ownerCanDecide = useMemo(() => isOwner && task && task.state !== 2 && task.state !== 3, [isOwner, task]);
 
   useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem(DRAFT_STORAGE_KEY);
-      if (!stored) {
-        setDraftHydrated(true);
-        return;
-      }
-      const draft = JSON.parse(stored) as Partial<Record<"title" | "description" | "criteria" | "reward" | "deadlineDate" | "deadlineTime", string>>;
-      if (typeof draft.title === "string") setTitle(draft.title);
-      if (typeof draft.description === "string") setDescription(draft.description);
-      if (typeof draft.criteria === "string") setCriteria(draft.criteria);
-      if (typeof draft.reward === "string") setReward(draft.reward);
-      if (typeof draft.deadlineDate === "string") setDeadlineDate(draft.deadlineDate);
-      if (typeof draft.deadlineTime === "string") setDeadlineTime(draft.deadlineTime);
-    } catch {
-      window.localStorage.removeItem(DRAFT_STORAGE_KEY);
-    } finally {
-      setDraftHydrated(true);
+    if (submitReceipt.isSuccess) {
+      taskRead.refetch();
+      submissionsRead.refetch();
+      hasSubmission.refetch();
+      setProof("");
     }
-  }, []);
+  }, [hasSubmission, submissionsRead, submitReceipt.isSuccess, taskRead]);
 
   useEffect(() => {
-    if (!draftHydrated) return;
-    const draft = { title, description, criteria, reward, deadlineDate, deadlineTime };
-    window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
-  }, [criteria, deadlineDate, deadlineTime, description, draftHydrated, reward, title]);
-
-  useEffect(() => {
-    if (address && !isWrongChain) {
-      allowance.refetch();
+    if (approveReceipt.isSuccess || rejectReceipt.isSuccess || closeReceipt.isSuccess || cancelReceipt.isSuccess) {
+      taskRead.refetch();
+      submissionsRead.refetch();
     }
-  }, [address, allowance, isWrongChain, rewardUnits]);
+  }, [approveReceipt.isSuccess, cancelReceipt.isSuccess, closeReceipt.isSuccess, rejectReceipt.isSuccess, submissionsRead, taskRead]);
 
-  useEffect(() => {
-    if (approveReceipt.isSuccess) {
-      allowance.refetch();
-    }
-  }, [allowance, approveReceipt.isSuccess]);
-
-  useEffect(() => {
-    if (createReceipt.isSuccess) {
-      balance.refetch();
-      window.localStorage.removeItem(DRAFT_STORAGE_KEY);
-    }
-  }, [balance, createReceipt.isSuccess]);
-
-  function submitCreate(event: FormEvent) {
+  function submitProof(event: FormEvent) {
     event.preventDefault();
-    setCreateAttempted(true);
-    if (!canCreate) return;
-    create.writeContract({
+    if (!canSubmit || submitInFlight || !proof.trim()) return;
+    submit.writeContract({
       address: CONTRACTS.proofPool,
       abi: proofPoolAbi,
-      functionName: "createTask",
-      args: [title, description, criteria, rewardUnits, deadlineSeconds]
+      functionName: "submitProof",
+      args: [taskId, proof]
     });
   }
 
+  if (invalidTaskId) {
+    return <div className="panel p-6 text-sm text-zinc-400">Invalid task ID.</div>;
+  }
+
+  if (!task) {
+    return <div className="panel p-6 text-sm text-zinc-400">Loading task...</div>;
+  }
+
   return (
-    <section className="mx-auto max-w-3xl space-y-8">
-      <div>
-        <p className="mb-3 inline-flex rounded-full border border-arc/30 bg-arc/10 px-3 py-1 text-xs font-black uppercase tracking-[0.18em] text-blue-200">
-          Escrow launch
-        </p>
-        <h1 className="text-4xl font-black text-white">Create Task</h1>
-        <p className="mt-3 text-sm leading-6 text-zinc-400">Approve USDC first, then lock the reward in escrow on Arc Testnet.</p>
+    <section className="space-y-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <h1 className="text-4xl font-black text-white">{task.title}</h1>
+            <StateBadge state={state} />
+          </div>
+          <p className="mt-3 text-sm text-zinc-400">
+            {formatUsdc(task.reward)} USDC reward · Deadline {formatDate(task.deadline)}
+          </p>
+          <p className="mt-1 text-sm text-zinc-500">Creator {shortAddress(task.creator)}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {canClose && (
+            <button className="btn btn-secondary" disabled={closeInFlight} onClick={() => close.writeContract({ address: CONTRACTS.proofPool, abi: proofPoolAbi, functionName: "closeTask", args: [taskId] })}>
+              {closeInFlight ? "Closing..." : "Close task"}
+            </button>
+          )}
+          {isOwner && task.state !== 2 && task.state !== 3 && (
+            <button className="btn btn-danger" disabled={cancelInFlight} onClick={() => cancel.writeContract({ address: CONTRACTS.proofPool, abi: proofPoolAbi, functionName: "cancel", args: [taskId] })}>
+              {cancelInFlight ? "Cancelling..." : "Cancel"}
+            </button>
+          )}
+        </div>
       </div>
 
-      <form onSubmit={submitCreate} className="panel space-y-5 p-6">
-        <label className="block text-sm font-semibold">
-          Title
-          <input className="control mt-1" value={title} onChange={(event) => setTitle(event.target.value)} required />
-        </label>
-        <label className="block text-sm font-semibold">
-          Description
-          <textarea className="control mt-1 min-h-28" value={description} onChange={(event) => setDescription(event.target.value)} required />
-        </label>
-        <label className="block text-sm font-semibold">
-          Acceptance criteria
-          <textarea className="control mt-1 min-h-24" value={criteria} onChange={(event) => setCriteria(event.target.value)} required />
-        </label>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-2">
-            <label className="block text-sm font-semibold">
-              Reward, USDC
-              <input className="control mt-1" inputMode="decimal" value={reward} onChange={(event) => setReward(event.target.value)} required />
-            </label>
-            {address && usdcBalance !== undefined && <p className="text-xs text-zinc-500">Wallet balance: {formatUsdc(usdcBalance)} USDC</p>}
-            {address && allowanceAmount !== undefined && rewardLooksValid && (
-              <p className={`text-xs ${hasAllowance ? "text-blue-200" : "text-zinc-500"}`}>
-                Current allowance: {formatUsdc(allowanceAmount)} USDC
-              </p>
-            )}
-            <FaucetHelper />
+      <div className="grid gap-4 lg:grid-cols-[1.4fr_0.8fr]">
+        <article className="panel space-y-4 p-4">
+          <div>
+            <h2 className="font-black">Description</h2>
+            <p className="mt-1 whitespace-pre-wrap text-sm">{task.description}</p>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block text-sm font-semibold">
-              Deadline date
-              <input className="control mt-1" type="date" value={deadlineDate} onChange={(event) => setDeadlineDate(event.target.value)} required />
-            </label>
-            <label className="block text-sm font-semibold">
-              Deadline time
-              <input className="control mt-1" type="time" value={deadlineTime} onChange={(event) => setDeadlineTime(event.target.value)} required />
-            </label>
+          <div>
+            <h2 className="font-black">Acceptance Criteria</h2>
+            <p className="mt-1 whitespace-pre-wrap text-sm">{task.acceptanceCriteria}</p>
           </div>
-        </div>
+        </article>
 
-        <ValidationPanel
-          title="Create task readiness"
-          errors={createAttempted ? createErrors : [...fieldErrors, ...walletErrors]}
-          success={fieldErrors.length === 0 && walletErrors.length === 0 ? (hasAllowance ? "Ready to create task." : "Fields are valid. Complete USDC approval next.") : undefined}
-        />
-
-        <div className="flex flex-col gap-3 sm:flex-row">
-          <button
-            className="btn btn-secondary"
-            type="button"
-            disabled={!canApprove}
-            onClick={() => {
-              setApproveAttempted(true);
-              if (!canApprove) return;
-              approve.writeContract({
-                address: CONTRACTS.usdc,
-                abi: erc20Abi,
-                functionName: "approve",
-                args: [CONTRACTS.proofPool, rewardUnits]
-              });
-            }}
-          >
-            {approve.isPending || approveReceipt.isLoading ? "1. Approving..." : approveReceipt.isSuccess || hasAllowance ? "1. USDC approved" : "1. Approve USDC"}
-          </button>
-          <button className="btn btn-primary" type="submit" disabled={!canCreate}>
-            {create.isPending || createReceipt.isLoading ? "2. Creating..." : "2. Create task"}
-          </button>
-        </div>
-        {approveAttempted && approvalErrors.length > 0 && <ValidationPanel title="Approval blocked" errors={approvalErrors} />}
-        {createAttempted && createErrors.length > 0 && <ValidationPanel title="Create blocked" errors={createErrors} />}
-        <TxStatus hash={approve.data} error={approve.error} />
-        <TxStatus hash={create.data} error={create.error} />
-        {(allowance.error || balance.error) && (
-          <div className="rounded-md border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-200">
-            {allowance.error && <p>Allowance read failed: {getReadableTxError(allowance.error)}</p>}
-            {balance.error && <p>USDC balance read failed: {getReadableTxError(balance.error)}</p>}
-          </div>
+        {(canSubmit || submit.data) && (
+          <form onSubmit={submitProof} className="panel space-y-3 p-4">
+            <h2 className="font-black">Submit Proof</h2>
+            <textarea className="control min-h-32" value={proof} onChange={(event) => setProof(event.target.value)} placeholder="IPFS hash or proof summary" required />
+            <button className="btn btn-primary w-full" disabled={!canSubmit || submitInFlight || !proof.trim()}>
+              {submit.isPending ? "Confirm in wallet..." : submitReceipt.isLoading ? "Submitting proof..." : submitReceipt.isSuccess ? "Proof submitted" : "Submit proof"}
+            </button>
+            <TxStatus hash={submit.data} error={submit.error} />
+          </form>
         )}
-      </form>
+      </div>
+
+      <section className="space-y-3">
+        <h2 className="text-xl font-black">Submissions</h2>
+        {submissions.map((submission) => (
+          <div key={submission.agent} className="panel p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Link href={`/agent/${submission.agent}`} className="font-black hover:text-arc">
+                    {shortAddress(submission.agent)}
+                  </Link>
+                  <SubmissionBadge status={submission.status} />
+                </div>
+                <p className="mt-1 text-xs text-zinc-500">{formatDate(submission.timestamp)}</p>
+              </div>
+              {ownerCanDecide && submission.status === 0 && (
+                <div className="flex gap-2">
+                  <button className="btn btn-primary" disabled={approveInFlight} onClick={() => approve.writeContract({ address: CONTRACTS.proofPool, abi: proofPoolAbi, functionName: "approve", args: [taskId, submission.agent as Address] })}>
+                    {approveInFlight ? "Approving..." : "Approve"}
+                  </button>
+                  <button className="btn btn-secondary" disabled={rejectInFlight} onClick={() => reject.writeContract({ address: CONTRACTS.proofPool, abi: proofPoolAbi, functionName: "reject", args: [taskId, submission.agent as Address] })}>
+                    {rejectInFlight ? "Rejecting..." : "Reject"}
+                  </button>
+                </div>
+              )}
+            </div>
+            <p className="mt-3 whitespace-pre-wrap break-words text-sm">{submission.proof}</p>
+          </div>
+        ))}
+        {submissions.length === 0 && <div className="panel p-6 text-sm text-zinc-400">No submissions yet. Registered agents can submit proof before the deadline.</div>}
+      </section>
+
+      <div className="space-y-1">
+        <TxStatus hash={approve.data} error={approve.error} />
+        <TxStatus hash={reject.data} error={reject.error} />
+        <TxStatus hash={close.data} error={close.error} />
+        <TxStatus hash={cancel.data} error={cancel.error} />
+      </div>
     </section>
-  );
-}
-
-function ValidationPanel({ title, errors, success }: { title: string; errors: string[]; success?: string }) {
-  if (errors.length === 0 && !success) return null;
-
-  return (
-    <div className={`rounded-md border p-4 text-sm ${errors.length > 0 ? "border-amber-400/30 bg-amber-400/10 text-amber-100" : "border-arc/30 bg-arc/10 text-blue-100"}`}>
-      <p className="font-black text-white">{title}</p>
-      {errors.length > 0 ? (
-        <ul className="mt-2 space-y-1">
-          {errors.map((error) => (
-            <li key={error}>{error}</li>
-          ))}
-        </ul>
-      ) : (
-        <p className="mt-2">{success}</p>
-      )}
-    </div>
   );
 }
