@@ -45,6 +45,7 @@ export default function CreateTaskPage() {
   const create = useWriteContract();
   const approveReceipt = useWaitForTransactionReceipt({ hash: approve.data });
   const createReceipt = useWaitForTransactionReceipt({ hash: create.data });
+  const refetchAllowance = allowance.refetch;
 
   const allowanceAmount = allowance.data as bigint | undefined;
   const approvalSatisfied = Boolean(rewardUnits > 0n && allowanceAmount !== undefined && allowanceAmount >= rewardUnits);
@@ -87,7 +88,7 @@ export default function CreateTaskPage() {
     rewardLooksValid && !approvalStatusLoading && !approvalSatisfied && "USDC approval is missing. Complete Step 1 before creating the task."
   ].filter(Boolean) as string[];
 
-  const canApprove = approvalErrors.length === 0 && !approve.isPending && !approveReceipt.isLoading;
+  const canApprove = approvalErrors.length === 0 && !approvalSatisfied && !allowanceRefreshing && !approve.isPending && !approveReceipt.isLoading;
   const canCreate = createErrors.length === 0 && !create.isPending && !createReceipt.isLoading;
 
   useEffect(() => {
@@ -119,18 +120,54 @@ export default function CreateTaskPage() {
 
   useEffect(() => {
     if (address && !isWrongChain) {
-      allowance.refetch();
+      refetchAllowance();
     }
-  }, [address, allowance, isWrongChain, rewardUnits]);
+  }, [address, isWrongChain, refetchAllowance, rewardUnits]);
 
   useEffect(() => {
-    if (approveReceipt.isSuccess) {
+    if (!approveReceipt.isSuccess || !address || isWrongChain || rewardUnits <= 0n) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function pollAllowance(attempt = 0) {
       setAllowanceRefreshing(true);
-      allowance.refetch().finally(() => {
+      try {
+        const result = await refetchAllowance();
+        const nextAllowance = result.data as bigint | undefined;
+        if (cancelled) return;
+        if (nextAllowance !== undefined && nextAllowance >= rewardUnits) {
+          setCreateAttempted(false);
+          setAllowanceRefreshing(false);
+          return;
+        }
+      } catch {
+        if (cancelled) return;
+      }
+
+      if (attempt >= 14) {
         setAllowanceRefreshing(false);
-      });
+        return;
+      }
+
+      timer = setTimeout(() => {
+        pollAllowance(attempt + 1);
+      }, 1_500);
     }
-  }, [allowance, approveReceipt.isSuccess]);
+
+    pollAllowance();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [address, approveReceipt.isSuccess, isWrongChain, refetchAllowance, rewardUnits]);
+
+  useEffect(() => {
+    if (approvalSatisfied) {
+      setAllowanceRefreshing(false);
+    }
+  }, [approvalSatisfied]);
 
   useEffect(() => {
     if (createReceipt.isSuccess) {
