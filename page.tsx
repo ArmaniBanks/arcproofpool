@@ -1,199 +1,301 @@
 "use client";
 
-import Link from "next/link";
-import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { usePublicClient, useReadContract, useReadContracts } from "wagmi";
-import { CONTRACTS } from "@/contracts.config";
-import { agentRegistryAbi, proofPoolAbi } from "@/lib/artifacts";
-import { derivedState, formatDate, formatUsdc, shortAddress } from "@/lib/format";
-import { getRegisteredAgentAddresses } from "@/lib/protocolEvents";
-import type { Agent, Task } from "@/lib/types";
-import type { Address } from "viem";
-import { StateBadge } from "@/components/StateBadge";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useAccount, useChainId, useReadContract, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
+import { ARC_TESTNET, CONTRACTS } from "@/contracts.config";
+import { erc20Abi, proofPoolAbi } from "@/lib/artifacts";
+import { formatUsdc, parseUsdc } from "@/lib/format";
+import { FaucetHelper } from "@/components/FaucetHelper";
+import { getReadableTxError, TxStatus } from "@/components/TxStatus";
 
-type AgentRow = {
-  address: Address;
-  agent: Agent;
-};
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const DRAFT_STORAGE_KEY = "arcproofpool:create-task-draft";
+const DATE_FORMAT = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_FORMAT = /^\d{2}:\d{2}$/;
 
-export default function LeaderboardPage() {
-  const publicClient = usePublicClient();
-  const agentsQuery = useQuery({
-    queryKey: ["registered-agents", CONTRACTS.agentRegistry],
-    queryFn: () => getRegisteredAgentAddresses(publicClient!),
-    enabled: Boolean(publicClient),
-    refetchInterval: 30_000
+export default function CreateTaskPage() {
+  const { address, isConnected } = useAccount();
+  const chainId = useChainId();
+  const [title, setTitle] = useState("Analyze suspicious Arc wallet activity");
+  const [description, setDescription] = useState("");
+  const [criteria, setCriteria] = useState("");
+  const [reward, setReward] = useState("5");
+  const [deadlineDate, setDeadlineDate] = useState("");
+  const [deadlineTime, setDeadlineTime] = useState("");
+  const [createAttempted, setCreateAttempted] = useState(false);
+  const [approveAttempted, setApproveAttempted] = useState(false);
+  const [draftHydrated, setDraftHydrated] = useState(false);
+  const [allowanceRefreshing, setAllowanceRefreshing] = useState(false);
+
+  const rewardUnits = useMemo(() => parseUsdc(reward), [reward]);
+  const isWrongChain = Boolean(isConnected && chainId !== ARC_TESTNET.id);
+  const allowance = useReadContract({
+    address: CONTRACTS.usdc,
+    abi: erc20Abi,
+    functionName: "allowance",
+    args: [address || ZERO_ADDRESS, CONTRACTS.proofPool]
   });
-
-  const agentAddresses: Address[] = agentsQuery.data || [];
-  const agentReads = useReadContracts({
-    contracts: agentAddresses.map((address) => ({
-      address: CONTRACTS.agentRegistry,
-      abi: agentRegistryAbi,
-      functionName: "getAgent",
-      args: [address]
-    }))
+  const balance = useReadContract({
+    address: CONTRACTS.usdc,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: [address || ZERO_ADDRESS]
   });
+  const approve = useWriteContract();
+  const create = useWriteContract();
+  const approveReceipt = useWaitForTransactionReceipt({ hash: approve.data });
+  const createReceipt = useWaitForTransactionReceipt({ hash: create.data });
 
-  const taskCount = useReadContract({
-    address: CONTRACTS.proofPool,
-    abi: proofPoolAbi,
-    functionName: "taskCount"
-  });
+  const allowanceAmount = allowance.data as bigint | undefined;
+  const approvalSatisfied = Boolean(rewardUnits > 0n && allowanceAmount !== undefined && allowanceAmount >= rewardUnits);
+  const approvalStatusLoading = Boolean(isConnected && !isWrongChain && (allowance.isLoading || allowance.isRefetching || allowanceRefreshing));
+  const usdcBalance = balance.data as bigint | undefined;
+  const hasBalance = usdcBalance !== undefined && usdcBalance >= rewardUnits;
+  const rewardLooksValid = /^\d+(\.\d{1,6})?$/.test(reward.trim()) && rewardUnits > 0n;
+  const deadlineDateValid = isValidDateInput(deadlineDate);
+  const deadlineTimeValid = isValidTimeInput(deadlineTime);
+  const deadlineMs = deadlineDateValid && deadlineTimeValid ? getDeadlineMs(deadlineDate, deadlineTime) : undefined;
+  const deadlineIsValid = Boolean(deadlineMs && Number.isFinite(deadlineMs) && deadlineMs > Date.now());
+  const deadlineSeconds = deadlineIsValid ? BigInt(Math.floor((deadlineMs as number) / 1000)) : 0n;
 
-  const taskIds = useMemo(
-    () => Array.from({ length: Number(taskCount.data || 0n) }, (_, index) => BigInt(index)),
-    [taskCount.data]
-  );
-  const taskReads = useReadContracts({
-    contracts: taskIds.map((id) => ({
+  const fieldErrors = [
+    !title.trim() && "Title is required.",
+    !description.trim() && "Description is required.",
+    !criteria.trim() && "Acceptance criteria are required.",
+    !reward.trim() && "Reward is required.",
+    reward.trim() && !rewardLooksValid && "Reward must be greater than 0 with up to 6 USDC decimals.",
+    !deadlineDate.trim() && "Deadline date is required.",
+    !deadlineTime.trim() && "Deadline time is required.",
+    deadlineDate.trim() && !deadlineDateValid && "Deadline date must be YYYY-MM-DD",
+    deadlineTime.trim() && !deadlineTimeValid && "Deadline time must be HH:MM",
+    deadlineDateValid && deadlineTimeValid && !deadlineIsValid && "Deadline must be in the future"
+  ].filter(Boolean) as string[];
+  const walletErrors = [
+    !isConnected && "Connect a wallet before creating a task.",
+    isWrongChain && `Switch to ${ARC_TESTNET.name} before sending transactions.`,
+    isConnected && !isWrongChain && usdcBalance === undefined && "USDC balance is still loading.",
+    isConnected && !isWrongChain && rewardLooksValid && usdcBalance !== undefined && !hasBalance && `Insufficient USDC balance. Wallet has ${formatUsdc(usdcBalance)} USDC.`
+  ].filter(Boolean) as string[];
+  const approvalErrors = [
+    ...fieldErrors,
+    ...walletErrors
+  ];
+  const createErrors = [
+    ...fieldErrors,
+    ...walletErrors,
+    approvalStatusLoading && !approvalSatisfied && "USDC approval status is still loading.",
+    rewardLooksValid && !approvalStatusLoading && !approvalSatisfied && "USDC approval is missing. Complete Step 1 before creating the task."
+  ].filter(Boolean) as string[];
+
+  const canApprove = approvalErrors.length === 0 && !approve.isPending && !approveReceipt.isLoading;
+  const canCreate = createErrors.length === 0 && !create.isPending && !createReceipt.isLoading;
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(DRAFT_STORAGE_KEY);
+      if (!stored) {
+        setDraftHydrated(true);
+        return;
+      }
+      const draft = JSON.parse(stored) as Partial<Record<"title" | "description" | "criteria" | "reward" | "deadlineDate" | "deadlineTime", string>>;
+      if (typeof draft.title === "string") setTitle(draft.title);
+      if (typeof draft.description === "string") setDescription(draft.description);
+      if (typeof draft.criteria === "string") setCriteria(draft.criteria);
+      if (typeof draft.reward === "string") setReward(draft.reward);
+      if (typeof draft.deadlineDate === "string") setDeadlineDate(draft.deadlineDate);
+      if (typeof draft.deadlineTime === "string") setDeadlineTime(draft.deadlineTime);
+    } catch {
+      window.localStorage.removeItem(DRAFT_STORAGE_KEY);
+    } finally {
+      setDraftHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!draftHydrated) return;
+    const draft = { title, description, criteria, reward, deadlineDate, deadlineTime };
+    window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+  }, [criteria, deadlineDate, deadlineTime, description, draftHydrated, reward, title]);
+
+  useEffect(() => {
+    if (address && !isWrongChain) {
+      allowance.refetch();
+    }
+  }, [address, allowance, isWrongChain, rewardUnits]);
+
+  useEffect(() => {
+    if (approveReceipt.isSuccess) {
+      setAllowanceRefreshing(true);
+      allowance.refetch().finally(() => {
+        setAllowanceRefreshing(false);
+      });
+    }
+  }, [allowance, approveReceipt.isSuccess]);
+
+  useEffect(() => {
+    if (createReceipt.isSuccess) {
+      balance.refetch();
+      window.localStorage.removeItem(DRAFT_STORAGE_KEY);
+    }
+  }, [balance, createReceipt.isSuccess]);
+
+  function submitCreate(event: FormEvent) {
+    event.preventDefault();
+    setCreateAttempted(true);
+    if (!canCreate) return;
+    create.writeContract({
       address: CONTRACTS.proofPool,
       abi: proofPoolAbi,
-      functionName: "getTask",
-      args: [id]
-    }))
-  });
-
-  const agentRows: AgentRow[] = (agentReads.data || [])
-    .map((result: { result?: unknown }, index: number) => ({
-      address: agentAddresses[index],
-      agent: result.result as Agent | undefined
-    }))
-    .filter((row: { address: Address; agent?: Agent }): row is AgentRow => Boolean(row.address && row.agent?.registered));
-
-  const topByReputation = [...agentRows]
-    .sort((a, b) => Number(b.agent.reputation - a.agent.reputation))
-    .slice(0, 20);
-  const topByEarned = [...agentRows]
-    .sort((a, b) => Number(b.agent.totalEarned - a.agent.totalEarned))
-    .slice(0, 20);
-
-  const topTasks: Array<{ id: bigint; task: Task }> = (taskReads.data || [])
-    .map((result: { result?: unknown }, index: number) => ({
-      id: taskIds[index],
-      task: result.result as Task | undefined
-    }))
-    .filter((row: { id: bigint; task?: Task }): row is { id: bigint; task: Task } => Boolean(row.task))
-    .sort((a: { id: bigint; task: Task }, b: { id: bigint; task: Task }) => Number(b.task.submissionCount - a.task.submissionCount))
-    .slice(0, 5);
+      functionName: "createTask",
+      args: [title, description, criteria, rewardUnits, deadlineSeconds]
+    });
+  }
 
   return (
-    <section className="space-y-10">
+    <section className="mx-auto max-w-3xl space-y-8">
       <div>
         <p className="mb-3 inline-flex rounded-full border border-arc/30 bg-arc/10 px-3 py-1 text-xs font-black uppercase tracking-[0.18em] text-blue-200">
-          Ecosystem rankings
+          Escrow launch
         </p>
-        <h1 className="text-4xl font-black text-white sm:text-5xl">Leaderboard</h1>
-        <p className="mt-4 max-w-2xl text-base leading-7 text-zinc-400">
-          Live protocol performers ranked from registry stats and ProofPool task data.
-        </p>
+        <h1 className="text-4xl font-black text-white">Create Task</h1>
+        <p className="mt-3 text-sm leading-6 text-zinc-400">Approve USDC first, then lock the reward in escrow on Arc Testnet.</p>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-2">
-        <AgentTable title="Top agents by reputation" rows={topByReputation} valueLabel="Reputation" value={(row) => row.agent.reputation.toString()} />
-        <AgentTable title="Top agents by USDC earned" rows={topByEarned} valueLabel="Total earned" value={(row) => `${formatUsdc(row.agent.totalEarned)} USDC`} />
-      </div>
-
-      <section className="panel p-6">
-        <div className="mb-5 flex items-center justify-between gap-4">
-          <div>
-            <h2 className="text-2xl font-black text-white">Top tasks by submissions</h2>
-            <p className="mt-1 text-sm text-zinc-500">The most competitive markets by proof volume.</p>
+      <form onSubmit={submitCreate} className="panel space-y-5 p-6">
+        <label className="block text-sm font-semibold">
+          Title
+          <input className="control mt-1" value={title} onChange={(event) => setTitle(event.target.value)} required />
+        </label>
+        <label className="block text-sm font-semibold">
+          Description
+          <textarea className="control mt-1 min-h-28" value={description} onChange={(event) => setDescription(event.target.value)} required />
+        </label>
+        <label className="block text-sm font-semibold">
+          Acceptance criteria
+          <textarea className="control mt-1 min-h-24" value={criteria} onChange={(event) => setCriteria(event.target.value)} required />
+        </label>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <label className="block text-sm font-semibold">
+              Reward, USDC
+              <input className="control mt-1" inputMode="decimal" value={reward} onChange={(event) => setReward(event.target.value)} required />
+            </label>
+            {address && usdcBalance !== undefined && <p className="text-xs text-zinc-500">Wallet balance: {formatUsdc(usdcBalance)} USDC</p>}
+            {address && allowanceAmount !== undefined && rewardLooksValid && (
+              <p className={`text-xs ${approvalSatisfied ? "text-blue-200" : "text-zinc-500"}`}>
+                Current allowance: {formatUsdc(allowanceAmount)} USDC
+              </p>
+            )}
+            <FaucetHelper />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block text-sm font-semibold">
+              Deadline date
+              <input
+                className="control mt-1"
+                inputMode="numeric"
+                placeholder="YYYY-MM-DD"
+                value={deadlineDate}
+                onChange={(event) => setDeadlineDate(event.target.value)}
+                required
+              />
+            </label>
+            <label className="block text-sm font-semibold">
+              Deadline time
+              <input
+                className="control mt-1"
+                inputMode="numeric"
+                placeholder="HH:MM"
+                value={deadlineTime}
+                onChange={(event) => setDeadlineTime(event.target.value)}
+                required
+              />
+            </label>
+            <p className="text-xs leading-5 text-zinc-500 sm:col-span-2">
+              Use future date and time. Example: 2026-05-27, 18:30
+            </p>
           </div>
         </div>
-        <div className="grid gap-3">
-          {topTasks.map(({ id, task }) => (
-            <Link key={id.toString()} href={`/task/${id}`} className="rounded-md border border-line bg-black/20 p-4 hover:border-arc/50">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="font-black text-white">{task.title}</h3>
-                    <StateBadge state={derivedState(task.state, task.deadline, Math.floor(Date.now() / 1000))} />
-                  </div>
-                  <p className="mt-2 text-sm text-zinc-500">Deadline {formatDate(task.deadline)}</p>
-                </div>
-                <div className="text-left md:text-right">
-                  <p className="text-xl font-black text-white">{task.submissionCount.toString()}</p>
-                  <p className="text-sm text-zinc-500">Submissions</p>
-                </div>
-              </div>
-            </Link>
-          ))}
-          {topTasks.length === 0 && (
-            <EmptyState
-              text="No tasks have been created yet. Submission rankings will appear once tasks go live."
-              href="/create-task"
-              cta="Create first task"
-            />
-          )}
+
+        <ValidationPanel
+          title="Create task readiness"
+          errors={createAttempted ? createErrors : [...fieldErrors, ...walletErrors]}
+          success={fieldErrors.length === 0 && walletErrors.length === 0 ? (approvalSatisfied ? "Ready to create task." : approvalStatusLoading ? "Checking USDC approval..." : "Fields are valid. Complete USDC approval next.") : undefined}
+        />
+
+        <div className="flex flex-col gap-3 sm:flex-row">
+          <button
+            className="btn btn-secondary"
+            type="button"
+            disabled={!canApprove}
+            onClick={() => {
+              setApproveAttempted(true);
+              if (!canApprove) return;
+              approve.writeContract({
+                address: CONTRACTS.usdc,
+                abi: erc20Abi,
+                functionName: "approve",
+                args: [CONTRACTS.proofPool, rewardUnits]
+              });
+            }}
+          >
+            {approve.isPending || approveReceipt.isLoading || allowanceRefreshing ? "1. Approving..." : approvalSatisfied ? "1. USDC approved" : "1. Approve USDC"}
+          </button>
+          <button className="btn btn-primary" type="submit" disabled={!canCreate}>
+            {create.isPending || createReceipt.isLoading ? "2. Creating..." : "2. Create task"}
+          </button>
         </div>
-      </section>
-    </section>
-  );
-}
-
-function AgentTable({
-  title,
-  rows,
-  valueLabel,
-  value
-}: {
-  title: string;
-  rows: AgentRow[];
-  valueLabel: string;
-  value: (row: AgentRow) => string;
-}) {
-  return (
-    <section className="panel overflow-hidden">
-      <div className="border-b border-line p-6">
-        <h2 className="text-2xl font-black text-white">{title}</h2>
-        <p className="mt-1 text-sm text-zinc-500">Top 20 live registry entries.</p>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[34rem] text-left text-sm">
-          <thead className="border-b border-line text-xs uppercase tracking-[0.16em] text-zinc-500">
-            <tr>
-              <th className="px-6 py-4">Rank</th>
-              <th className="px-6 py-4">Agent</th>
-              <th className="px-6 py-4">{valueLabel}</th>
-              <th className="px-6 py-4">Completed</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, index) => (
-              <tr key={row.address} className="border-b border-line/70 last:border-0">
-                <td className="px-6 py-4 font-black text-zinc-400">#{index + 1}</td>
-                <td className="px-6 py-4">
-                  <Link href={`/agent/${row.address}`} className="font-black text-white hover:text-blue-200">
-                    {shortAddress(row.address)}
-                  </Link>
-                </td>
-                <td className="px-6 py-4 font-black text-white">{value(row)}</td>
-                <td className="px-6 py-4 text-zinc-400">{row.agent.totalTasksCompleted.toString()}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {rows.length === 0 && (
-          <EmptyState
-            text="No registered agents found yet. Rankings will populate from AgentRegistered events."
-            href="/register"
-            cta="Register an agent"
-          />
+        {approveAttempted && approvalErrors.length > 0 && <ValidationPanel title="Approval blocked" errors={approvalErrors} />}
+        {createAttempted && createErrors.length > 0 && <ValidationPanel title="Create blocked" errors={createErrors} />}
+        <TxStatus hash={approve.data} error={approve.error} />
+        <TxStatus hash={create.data} error={create.error} />
+        {(allowance.error || balance.error) && (
+          <div className="rounded-md border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-200">
+            {allowance.error && <p>Allowance read failed: {getReadableTxError(allowance.error)}</p>}
+            {balance.error && <p>USDC balance read failed: {getReadableTxError(balance.error)}</p>}
+          </div>
         )}
-      </div>
+      </form>
     </section>
   );
 }
 
-function EmptyState({ text, href, cta }: { text: string; href: string; cta: string }) {
+function isValidDateInput(value: string) {
+  const trimmed = value.trim();
+  if (!DATE_FORMAT.test(trimmed)) return false;
+  const [year, month, day] = trimmed.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+function isValidTimeInput(value: string) {
+  const trimmed = value.trim();
+  if (!TIME_FORMAT.test(trimmed)) return false;
+  const [hour, minute] = trimmed.split(":").map(Number);
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+}
+
+function getDeadlineMs(dateValue: string, timeValue: string) {
+  const [year, month, day] = dateValue.trim().split("-").map(Number);
+  const [hour, minute] = timeValue.trim().split(":").map(Number);
+  return new Date(year, month - 1, day, hour, minute, 0).getTime();
+}
+
+function ValidationPanel({ title, errors, success }: { title: string; errors: string[]; success?: string }) {
+  if (errors.length === 0 && !success) return null;
+
   return (
-    <div className="m-4 rounded-md border border-line bg-black/20 p-5 text-sm leading-6 text-zinc-500">
-      <p>{text}</p>
-      <Link href={href} className="mt-4 inline-flex font-black text-blue-300 hover:text-blue-100">
-        {cta}
-      </Link>
+    <div className={`rounded-md border p-4 text-sm ${errors.length > 0 ? "border-amber-400/30 bg-amber-400/10 text-amber-100" : "border-arc/30 bg-arc/10 text-blue-100"}`}>
+      <p className="font-black text-white">{title}</p>
+      {errors.length > 0 ? (
+        <ul className="mt-2 space-y-1">
+          {errors.map((error) => (
+            <li key={error}>{error}</li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-2">{success}</p>
+      )}
     </div>
   );
 }
