@@ -25,46 +25,50 @@ export function getReadableTxError(error?: Error | null) {
     return "This wallet is already registered.";
   }
   if (lower.includes("user rejected") || lower.includes("user denied") || lower.includes("rejected the request")) {
-    return "Transaction rejected.";
+    return "Wallet rejected transaction.";
   }
-  if (lower.includes("insufficient funds") || lower.includes("insufficient gas")) {
+  if (lower.includes("insufficient funds") || lower.includes("insufficient balance")) {
+    return "Insufficient balance.";
+  }
+  if (lower.includes("insufficient gas")) {
     return "Insufficient gas.";
   }
   if (lower.includes("wrong network") || lower.includes("chain mismatch") || lower.includes("unsupported chain")) {
     return "Wrong network.";
   }
   if (lower.includes("abi") && (lower.includes("decode") || lower.includes("signature"))) {
-    return "Contract rejected the transaction. Refresh the page and check wallet status before trying again.";
+    return "Contract call could not be decoded. Refresh the page and try again.";
   }
   if (lower.includes("execution reverted") || lower.includes("revert")) {
     return message.replace(/\\n\\s*/g, " ");
   }
   if (lower.includes("rpc") || lower.includes("fetch") || lower.includes("request")) {
-    return `RPC error: ${message}`;
+    return "RPC failed, retry.";
   }
 
   return message;
+}
+
+function shortHash(hash: Hash) {
+  return `${hash.slice(0, 6)}...${hash.slice(-4)}`;
 }
 
 function StatusLine({ hash, label, tone = "success" }: { hash?: Hash; label: string; tone?: "success" | "error" }) {
   const toneClass = tone === "error" ? "border-red-400/30 bg-red-400/10 text-red-200" : "border-arc/30 bg-arc/10 text-blue-100";
 
   return (
-    <p className={`rounded-md border px-3 py-2 text-sm font-semibold ${toneClass}`}>
-      {label}
+    <div className={`flex flex-col gap-1 rounded-md border px-3 py-2 text-sm font-semibold sm:flex-row sm:items-center sm:justify-between ${toneClass}`}>
+      <span>{label}</span>
       {hash && (
-        <>
-          {" "}
-          <a
-            className="font-black underline-offset-4 hover:underline"
-            href={`${ARC_TESTNET.explorerUrl}/tx/${hash}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            View tx
-          </a>
-        </>
+        <a
+          className="font-mono text-xs font-black text-blue-100 underline-offset-4 hover:text-white hover:underline"
+          href={`${ARC_TESTNET.explorerUrl}/tx/${hash}`}
+          target="_blank"
+          rel="noreferrer"
+        >
+          ArcScan {shortHash(hash)}
+        </a>
       )}
-    </p>
+    </div>
   );
 }
