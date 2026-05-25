@@ -23,7 +23,6 @@ export default function CreateTaskPage() {
   const [deadlineDate, setDeadlineDate] = useState("");
   const [deadlineTime, setDeadlineTime] = useState("");
   const [createAttempted, setCreateAttempted] = useState(false);
-  const [approveAttempted, setApproveAttempted] = useState(false);
   const [draftHydrated, setDraftHydrated] = useState(false);
   const [allowanceRefreshing, setAllowanceRefreshing] = useState(false);
 
@@ -48,8 +47,8 @@ export default function CreateTaskPage() {
   const refetchAllowance = allowance.refetch;
 
   const allowanceAmount = allowance.data as bigint | undefined;
-  const approvalSatisfied = Boolean(rewardUnits > 0n && allowanceAmount !== undefined && allowanceAmount >= rewardUnits);
-  const approvalStatusLoading = Boolean(isConnected && !isWrongChain && (allowance.isLoading || allowance.isRefetching || allowanceRefreshing));
+  const isApproved = Boolean(rewardUnits > 0n && allowanceAmount !== undefined && allowanceAmount >= rewardUnits);
+  const approvalStatusLoading = Boolean(isConnected && !isWrongChain && !isApproved && (allowance.isLoading || allowance.isRefetching || allowanceRefreshing));
   const usdcBalance = balance.data as bigint | undefined;
   const hasBalance = usdcBalance !== undefined && usdcBalance >= rewardUnits;
   const rewardLooksValid = /^\d+(\.\d{1,6})?$/.test(reward.trim()) && rewardUnits > 0n;
@@ -84,11 +83,11 @@ export default function CreateTaskPage() {
   const createErrors = [
     ...fieldErrors,
     ...walletErrors,
-    approvalStatusLoading && !approvalSatisfied && "USDC approval status is still loading.",
-    rewardLooksValid && !approvalStatusLoading && !approvalSatisfied && "USDC approval is missing. Complete Step 1 before creating the task."
+    approvalStatusLoading && !isApproved && "USDC approval status is still loading.",
+    rewardLooksValid && !approvalStatusLoading && !isApproved && "USDC approval is missing. Complete Step 1 before creating the task."
   ].filter(Boolean) as string[];
 
-  const canApprove = approvalErrors.length === 0 && !approvalSatisfied && !allowanceRefreshing && !approve.isPending && !approveReceipt.isLoading;
+  const canApprove = approvalErrors.length === 0 && !isApproved && !allowanceRefreshing && !approve.isPending && !approveReceipt.isLoading;
   const canCreate = createErrors.length === 0 && !create.isPending && !createReceipt.isLoading;
 
   useEffect(() => {
@@ -123,6 +122,22 @@ export default function CreateTaskPage() {
       refetchAllowance();
     }
   }, [address, isWrongChain, refetchAllowance, rewardUnits]);
+
+  useEffect(() => {
+    if (!address || isWrongChain) return;
+
+    function refetchOnFocus() {
+      refetchAllowance();
+    }
+
+    window.addEventListener("focus", refetchOnFocus);
+    document.addEventListener("visibilitychange", refetchOnFocus);
+
+    return () => {
+      window.removeEventListener("focus", refetchOnFocus);
+      document.removeEventListener("visibilitychange", refetchOnFocus);
+    };
+  }, [address, isWrongChain, refetchAllowance]);
 
   useEffect(() => {
     if (!approveReceipt.isSuccess || !address || isWrongChain || rewardUnits <= 0n) return;
@@ -164,10 +179,10 @@ export default function CreateTaskPage() {
   }, [address, approveReceipt.isSuccess, isWrongChain, refetchAllowance, rewardUnits]);
 
   useEffect(() => {
-    if (approvalSatisfied) {
+    if (isApproved) {
       setAllowanceRefreshing(false);
     }
-  }, [approvalSatisfied]);
+  }, [isApproved]);
 
   useEffect(() => {
     if (createReceipt.isSuccess) {
@@ -219,7 +234,7 @@ export default function CreateTaskPage() {
             </label>
             {address && usdcBalance !== undefined && <p className="text-xs text-zinc-500">Wallet balance: {formatUsdc(usdcBalance)} USDC</p>}
             {address && allowanceAmount !== undefined && rewardLooksValid && (
-              <p className={`text-xs ${approvalSatisfied ? "text-blue-200" : "text-zinc-500"}`}>
+              <p className={`text-xs ${isApproved ? "text-blue-200" : "text-zinc-500"}`}>
                 Current allowance: {formatUsdc(allowanceAmount)} USDC
               </p>
             )}
@@ -257,7 +272,7 @@ export default function CreateTaskPage() {
         <ValidationPanel
           title="Create task readiness"
           errors={createAttempted ? createErrors : [...fieldErrors, ...walletErrors]}
-          success={fieldErrors.length === 0 && walletErrors.length === 0 ? (approvalSatisfied ? "Ready to create task." : approvalStatusLoading ? "Checking USDC approval..." : "Fields are valid. Complete USDC approval next.") : undefined}
+          success={fieldErrors.length === 0 && walletErrors.length === 0 ? (isApproved ? "Ready to create task." : approvalStatusLoading ? "Checking USDC approval..." : "Fields are valid. Complete USDC approval next.") : undefined}
         />
 
         <div className="flex flex-col gap-3 sm:flex-row">
@@ -266,7 +281,6 @@ export default function CreateTaskPage() {
             type="button"
             disabled={!canApprove}
             onClick={() => {
-              setApproveAttempted(true);
               if (!canApprove) return;
               approve.writeContract({
                 address: CONTRACTS.usdc,
@@ -276,13 +290,12 @@ export default function CreateTaskPage() {
               });
             }}
           >
-            {approve.isPending || approveReceipt.isLoading || allowanceRefreshing ? "1. Approving..." : approvalSatisfied ? "1. USDC approved" : "1. Approve USDC"}
+            {approve.isPending || approveReceipt.isLoading || allowanceRefreshing ? "1. Approving..." : isApproved ? "1. USDC approved" : "1. Approve USDC"}
           </button>
           <button className="btn btn-primary" type="submit" disabled={!canCreate}>
             {create.isPending || createReceipt.isLoading ? "2. Creating..." : "2. Create task"}
           </button>
         </div>
-        {approveAttempted && approvalErrors.length > 0 && <ValidationPanel title="Approval blocked" errors={approvalErrors} />}
         {createAttempted && createErrors.length > 0 && <ValidationPanel title="Create blocked" errors={createErrors} />}
         <TxStatus hash={approve.data} error={approve.error} />
         <TxStatus hash={create.data} error={create.error} />
