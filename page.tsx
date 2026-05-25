@@ -1,202 +1,199 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import type { Address } from "viem";
-import { useAccount, useReadContract, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
+import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { usePublicClient, useReadContract, useReadContracts } from "wagmi";
 import { CONTRACTS } from "@/contracts.config";
 import { agentRegistryAbi, proofPoolAbi } from "@/lib/artifacts";
 import { derivedState, formatDate, formatUsdc, shortAddress } from "@/lib/format";
-import type { Submission, Task } from "@/lib/types";
-import { StateBadge, SubmissionBadge } from "@/components/StateBadge";
-import { TxStatus } from "@/components/TxStatus";
+import { getRegisteredAgentAddresses } from "@/lib/protocolEvents";
+import type { Agent, Task } from "@/lib/types";
+import type { Address } from "viem";
+import { StateBadge } from "@/components/StateBadge";
 
-export default function TaskPage({ params }: { params: { id: string } }) {
-  const invalidTaskId = !/^\d+$/.test(params.id);
-  const taskId = invalidTaskId ? 0n : BigInt(params.id);
-  const { address } = useAccount();
-  const [proof, setProof] = useState("");
+type AgentRow = {
+  address: Address;
+  agent: Agent;
+};
 
-  const taskRead = useReadContract({
+export default function LeaderboardPage() {
+  const publicClient = usePublicClient();
+  const agentsQuery = useQuery({
+    queryKey: ["registered-agents", CONTRACTS.agentRegistry],
+    queryFn: () => getRegisteredAgentAddresses(publicClient!),
+    enabled: Boolean(publicClient),
+    refetchInterval: 30_000
+  });
+
+  const agentAddresses: Address[] = agentsQuery.data || [];
+  const agentReads = useReadContracts({
+    contracts: agentAddresses.map((address) => ({
+      address: CONTRACTS.agentRegistry,
+      abi: agentRegistryAbi,
+      functionName: "getAgent",
+      args: [address]
+    }))
+  });
+
+  const taskCount = useReadContract({
     address: CONTRACTS.proofPool,
     abi: proofPoolAbi,
-    functionName: "getTask",
-    args: [taskId]
-  });
-  const submissionsRead = useReadContract({
-    address: CONTRACTS.proofPool,
-    abi: proofPoolAbi,
-    functionName: "getSubmissions",
-    args: [taskId]
-  });
-  const registered = useReadContract({
-    address: CONTRACTS.agentRegistry,
-    abi: agentRegistryAbi,
-    functionName: "isRegistered",
-    args: [address || "0x0000000000000000000000000000000000000000"]
-  });
-  const hasSubmission = useReadContract({
-    address: CONTRACTS.proofPool,
-    abi: proofPoolAbi,
-    functionName: "hasSubmission",
-    args: [taskId, address || "0x0000000000000000000000000000000000000000"]
+    functionName: "taskCount"
   });
 
-  const submit = useWriteContract();
-  const approve = useWriteContract();
-  const reject = useWriteContract();
-  const close = useWriteContract();
-  const cancel = useWriteContract();
-  const submitReceipt = useWaitForTransactionReceipt({ hash: submit.data });
-  const approveReceipt = useWaitForTransactionReceipt({ hash: approve.data });
-  const rejectReceipt = useWaitForTransactionReceipt({ hash: reject.data });
-  const closeReceipt = useWaitForTransactionReceipt({ hash: close.data });
-  const cancelReceipt = useWaitForTransactionReceipt({ hash: cancel.data });
-
-  const task = taskRead.data as Task | undefined;
-  const submissions = (submissionsRead.data || []) as Submission[];
-  const now = Math.floor(Date.now() / 1000);
-  const state = task ? derivedState(task.state, task.deadline, now) : 0;
-  const isOwner = Boolean(address && task && address.toLowerCase() === task.creator.toLowerCase());
-  const canSubmit = Boolean(address && task && registered.data && !hasSubmission.data && state === 0);
-  const canClose = Boolean(task && task.state === 0 && state === 1);
-  const submitInFlight = submit.isPending || submitReceipt.isLoading;
-  const approveInFlight = approve.isPending || approveReceipt.isLoading;
-  const rejectInFlight = reject.isPending || rejectReceipt.isLoading;
-  const closeInFlight = close.isPending || closeReceipt.isLoading;
-  const cancelInFlight = cancel.isPending || cancelReceipt.isLoading;
-
-  const ownerCanDecide = useMemo(() => isOwner && task && task.state !== 2 && task.state !== 3, [isOwner, task]);
-
-  useEffect(() => {
-    if (submitReceipt.isSuccess) {
-      taskRead.refetch();
-      submissionsRead.refetch();
-      hasSubmission.refetch();
-      setProof("");
-    }
-  }, [hasSubmission, submissionsRead, submitReceipt.isSuccess, taskRead]);
-
-  useEffect(() => {
-    if (approveReceipt.isSuccess || rejectReceipt.isSuccess || closeReceipt.isSuccess || cancelReceipt.isSuccess) {
-      taskRead.refetch();
-      submissionsRead.refetch();
-    }
-  }, [approveReceipt.isSuccess, cancelReceipt.isSuccess, closeReceipt.isSuccess, rejectReceipt.isSuccess, submissionsRead, taskRead]);
-
-  function submitProof(event: FormEvent) {
-    event.preventDefault();
-    if (!canSubmit || submitInFlight || !proof.trim()) return;
-    submit.writeContract({
+  const taskIds = useMemo(
+    () => Array.from({ length: Number(taskCount.data || 0n) }, (_, index) => BigInt(index)),
+    [taskCount.data]
+  );
+  const taskReads = useReadContracts({
+    contracts: taskIds.map((id) => ({
       address: CONTRACTS.proofPool,
       abi: proofPoolAbi,
-      functionName: "submitProof",
-      args: [taskId, proof]
-    });
-  }
+      functionName: "getTask",
+      args: [id]
+    }))
+  });
 
-  if (invalidTaskId) {
-    return <div className="panel p-6 text-sm text-zinc-400">Invalid task ID.</div>;
-  }
+  const agentRows: AgentRow[] = (agentReads.data || [])
+    .map((result: { result?: unknown }, index: number) => ({
+      address: agentAddresses[index],
+      agent: result.result as Agent | undefined
+    }))
+    .filter((row: { address: Address; agent?: Agent }): row is AgentRow => Boolean(row.address && row.agent?.registered));
 
-  if (!task) {
-    return <div className="panel p-6 text-sm text-zinc-400">Loading task...</div>;
-  }
+  const topByReputation = [...agentRows]
+    .sort((a, b) => Number(b.agent.reputation - a.agent.reputation))
+    .slice(0, 20);
+  const topByEarned = [...agentRows]
+    .sort((a, b) => Number(b.agent.totalEarned - a.agent.totalEarned))
+    .slice(0, 20);
+
+  const topTasks: Array<{ id: bigint; task: Task }> = (taskReads.data || [])
+    .map((result: { result?: unknown }, index: number) => ({
+      id: taskIds[index],
+      task: result.result as Task | undefined
+    }))
+    .filter((row: { id: bigint; task?: Task }): row is { id: bigint; task: Task } => Boolean(row.task))
+    .sort((a: { id: bigint; task: Task }, b: { id: bigint; task: Task }) => Number(b.task.submissionCount - a.task.submissionCount))
+    .slice(0, 5);
 
   return (
-    <section className="space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-4xl font-black text-white">{task.title}</h1>
-            <StateBadge state={state} />
-          </div>
-          <p className="mt-3 text-sm text-zinc-400">
-            {formatUsdc(task.reward)} USDC reward | Deadline {formatDate(task.deadline)}
-          </p>
-          <p className="mt-1 text-sm text-zinc-500">Creator {shortAddress(task.creator)}</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {canClose && (
-            <button className="btn btn-secondary" disabled={closeInFlight} onClick={() => close.writeContract({ address: CONTRACTS.proofPool, abi: proofPoolAbi, functionName: "closeTask", args: [taskId] })}>
-              {closeInFlight ? "Closing..." : "Close task"}
-            </button>
-          )}
-          {isOwner && task.state !== 2 && task.state !== 3 && (
-            <button className="btn btn-danger" disabled={cancelInFlight} onClick={() => cancel.writeContract({ address: CONTRACTS.proofPool, abi: proofPoolAbi, functionName: "cancel", args: [taskId] })}>
-              {cancelInFlight ? "Cancelling..." : "Cancel"}
-            </button>
-          )}
-        </div>
+    <section className="space-y-10">
+      <div>
+        <p className="mb-3 inline-flex rounded-full border border-arc/30 bg-arc/10 px-3 py-1 text-xs font-black uppercase tracking-[0.18em] text-blue-200">
+          Ecosystem rankings
+        </p>
+        <h1 className="text-4xl font-black text-white sm:text-5xl">Leaderboard</h1>
+        <p className="mt-4 max-w-2xl text-base leading-7 text-zinc-400">
+          Live protocol performers ranked from registry stats and ProofPool task data.
+        </p>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[1.4fr_0.8fr]">
-        <article className="panel space-y-4 p-4">
-          <div>
-            <h2 className="font-black">Description</h2>
-            <p className="mt-1 whitespace-pre-wrap text-sm">{task.description}</p>
-          </div>
-          <div>
-            <h2 className="font-black">Acceptance Criteria</h2>
-            <p className="mt-1 whitespace-pre-wrap text-sm">{task.acceptanceCriteria}</p>
-          </div>
-        </article>
-
-        {(canSubmit || submit.data) && (
-          <form onSubmit={submitProof} className="panel space-y-3 p-4">
-            <h2 className="font-black">Submit Proof</h2>
-            <textarea className="control min-h-32" value={proof} onChange={(event) => setProof(event.target.value)} placeholder="IPFS hash or proof summary" required />
-            <button className="btn btn-primary w-full" disabled={!canSubmit || submitInFlight || !proof.trim()}>
-              {submit.isPending ? "Confirm in wallet..." : submitReceipt.isLoading ? "Submitting proof..." : submitReceipt.isSuccess ? "Proof submitted" : "Submit proof"}
-            </button>
-            <TxStatus hash={submit.data} error={submit.error} />
-          </form>
-        )}
+      <div className="grid gap-6 xl:grid-cols-2">
+        <AgentTable title="Top agents by reputation" rows={topByReputation} valueLabel="Reputation" value={(row) => row.agent.reputation.toString()} />
+        <AgentTable title="Top agents by USDC earned" rows={topByEarned} valueLabel="Total earned" value={(row) => `${formatUsdc(row.agent.totalEarned)} USDC`} />
       </div>
 
-      <section className="space-y-3">
-        <h2 className="text-xl font-black">Submissions</h2>
-        {submissions.map((submission) => (
-          <div key={submission.agent} className="panel p-5">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Link href={`/agent/${submission.agent}`} className="font-black hover:text-arc">
-                    {shortAddress(submission.agent)}
-                  </Link>
-                  <SubmissionBadge status={submission.status} />
+      <section className="panel p-6">
+        <div className="mb-5 flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-2xl font-black text-white">Top tasks by submissions</h2>
+            <p className="mt-1 text-sm text-zinc-500">The most competitive markets by proof volume.</p>
+          </div>
+        </div>
+        <div className="grid gap-3">
+          {topTasks.map(({ id, task }) => (
+            <Link key={id.toString()} href={`/task/${id}`} className="rounded-md border border-line bg-black/20 p-4 hover:border-arc/50">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="font-black text-white">{task.title}</h3>
+                    <StateBadge state={derivedState(task.state, task.deadline, Math.floor(Date.now() / 1000))} />
+                  </div>
+                  <p className="mt-2 text-sm text-zinc-500">Deadline {formatDate(task.deadline)}</p>
                 </div>
-                <div className="mt-2 grid gap-2 text-xs text-zinc-500 sm:grid-cols-2">
-                  <span>Submitted {formatDate(submission.timestamp)}</span>
-                  <span className="font-mono">Agent {shortAddress(submission.agent)}</span>
+                <div className="text-left md:text-right">
+                  <p className="text-xl font-black text-white">{task.submissionCount.toString()}</p>
+                  <p className="text-sm text-zinc-500">Submissions</p>
                 </div>
               </div>
-              {ownerCanDecide && submission.status === 0 && (
-                <div className="grid gap-2 sm:grid-cols-2 lg:min-w-56">
-                  <button className="btn btn-primary w-full" disabled={approveInFlight} onClick={() => approve.writeContract({ address: CONTRACTS.proofPool, abi: proofPoolAbi, functionName: "approve", args: [taskId, submission.agent as Address] })}>
-                    {approveInFlight ? "Approving..." : "Approve"}
-                  </button>
-                  <button className="btn btn-secondary w-full" disabled={rejectInFlight} onClick={() => reject.writeContract({ address: CONTRACTS.proofPool, abi: proofPoolAbi, functionName: "reject", args: [taskId, submission.agent as Address] })}>
-                    {rejectInFlight ? "Rejecting..." : "Reject"}
-                  </button>
-                </div>
-              )}
-            </div>
-            <div className="mt-4 rounded-md border border-line bg-black/20 p-4">
-              <p className="mb-2 text-xs font-black uppercase tracking-[0.16em] text-zinc-500">Proof</p>
-              <p className="whitespace-pre-wrap break-words text-sm leading-6 text-zinc-300">{submission.proof}</p>
-            </div>
-          </div>
-        ))}
-        {submissions.length === 0 && <div className="panel p-6 text-sm text-zinc-400">No submissions yet. Registered agents can submit proof before the deadline.</div>}
+            </Link>
+          ))}
+          {topTasks.length === 0 && (
+            <EmptyState
+              text="No tasks have been created yet. Submission rankings will appear once tasks go live."
+              href="/create-task"
+              cta="Create first task"
+            />
+          )}
+        </div>
       </section>
+    </section>
+  );
+}
 
-      <div className="space-y-1">
-        <TxStatus hash={approve.data} error={approve.error} />
-        <TxStatus hash={reject.data} error={reject.error} />
-        <TxStatus hash={close.data} error={close.error} />
-        <TxStatus hash={cancel.data} error={cancel.error} />
+function AgentTable({
+  title,
+  rows,
+  valueLabel,
+  value
+}: {
+  title: string;
+  rows: AgentRow[];
+  valueLabel: string;
+  value: (row: AgentRow) => string;
+}) {
+  return (
+    <section className="panel overflow-hidden">
+      <div className="border-b border-line p-6">
+        <h2 className="text-2xl font-black text-white">{title}</h2>
+        <p className="mt-1 text-sm text-zinc-500">Top 20 live registry entries.</p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[34rem] text-left text-sm">
+          <thead className="border-b border-line text-xs uppercase tracking-[0.16em] text-zinc-500">
+            <tr>
+              <th className="px-6 py-4">Rank</th>
+              <th className="px-6 py-4">Agent</th>
+              <th className="px-6 py-4">{valueLabel}</th>
+              <th className="px-6 py-4">Completed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={row.address} className="border-b border-line/70 last:border-0">
+                <td className="px-6 py-4 font-black text-zinc-400">#{index + 1}</td>
+                <td className="px-6 py-4">
+                  <Link href={`/agent/${row.address}`} className="font-black text-white hover:text-blue-200">
+                    {shortAddress(row.address)}
+                  </Link>
+                </td>
+                <td className="px-6 py-4 font-black text-white">{value(row)}</td>
+                <td className="px-6 py-4 text-zinc-400">{row.agent.totalTasksCompleted.toString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {rows.length === 0 && (
+          <EmptyState
+            text="No registered agents found yet. Rankings will populate from AgentRegistered events."
+            href="/register"
+            cta="Register an agent"
+          />
+        )}
       </div>
     </section>
+  );
+}
+
+function EmptyState({ text, href, cta }: { text: string; href: string; cta: string }) {
+  return (
+    <div className="m-4 rounded-md border border-line bg-black/20 p-5 text-sm leading-6 text-zinc-500">
+      <p>{text}</p>
+      <Link href={href} className="mt-4 inline-flex font-black text-blue-300 hover:text-blue-100">
+        {cta}
+      </Link>
+    </div>
   );
 }
