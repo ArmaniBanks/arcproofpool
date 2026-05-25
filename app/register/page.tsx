@@ -1,20 +1,50 @@
 "use client";
 
-import { useAccount, useReadContract, useWriteContract } from "wagmi";
-import { CONTRACTS } from "@/contracts.config";
+import { useEffect, useState } from "react";
+import { formatEther } from "viem";
+import { useAccount, useBalance, useChainId, useReadContract, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
+import { ARC_TESTNET, CONTRACTS } from "@/contracts.config";
 import { agentRegistryAbi } from "@/lib/artifacts";
 import { FaucetHelper } from "@/components/FaucetHelper";
-import { TxStatus } from "@/components/TxStatus";
+import { getReadableTxError, TxStatus } from "@/components/TxStatus";
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 export default function RegisterPage() {
-  const { address } = useAccount();
+  const { address, isConnected } = useAccount();
+  const chainId = useChainId();
+  const [attempted, setAttempted] = useState(false);
+  const isWrongChain = Boolean(isConnected && chainId !== ARC_TESTNET.id);
   const registered = useReadContract({
     address: CONTRACTS.agentRegistry,
     abi: agentRegistryAbi,
     functionName: "isRegistered",
-    args: [address || "0x0000000000000000000000000000000000000000"]
+    args: [address || ZERO_ADDRESS]
+  });
+  const gasBalance = useBalance({
+    address,
+    chainId: ARC_TESTNET.id
   });
   const register = useWriteContract();
+  const receipt = useWaitForTransactionReceipt({ hash: register.data });
+  const registrationLoading = Boolean(isConnected && !isWrongChain && registered.isPending);
+  const alreadyRegistered = Boolean(registered.data || receipt.isSuccess);
+  const inFlight = register.isPending || receipt.isLoading;
+  const registerErrors = [
+    !isConnected && "Connect a wallet before registering.",
+    isWrongChain && `Switch to ${ARC_TESTNET.name} before registering.`,
+    registrationLoading && "Checking registration status.",
+    isConnected && !isWrongChain && gasBalance.data === undefined && "Gas balance is still loading.",
+    isConnected && !isWrongChain && gasBalance.data !== undefined && gasBalance.data.value === 0n && "Insufficient native gas balance on Arc Testnet.",
+    alreadyRegistered && "This wallet is already registered as an agent."
+  ].filter(Boolean) as string[];
+  const canRegister = registerErrors.length === 0 && !inFlight;
+
+  useEffect(() => {
+    if (receipt.isSuccess) {
+      registered.refetch();
+    }
+  }, [receipt.isSuccess, registered]);
 
   return (
     <section className="mx-auto max-w-4xl space-y-8">
@@ -44,28 +74,71 @@ export default function RegisterPage() {
           <FaucetHelper gas />
           <p className="text-sm leading-6 text-zinc-400">
             {address
-              ? registered.data
+              ? registrationLoading
+                ? "Checking whether this wallet is already registered."
+                : alreadyRegistered
                 ? "This wallet is already registered as an agent."
                 : "Register this wallet to submit proof for marketplace tasks."
               : "Connect a wallet to check registration."}
           </p>
+          {address && gasBalance.data && (
+            <p className="rounded-md border border-line bg-black/20 p-3 text-xs text-zinc-500">
+              Arc gas balance: {Number(formatEther(gasBalance.data.value)).toLocaleString(undefined, { maximumFractionDigits: 6 })} {gasBalance.data.symbol}
+            </p>
+          )}
+          {attempted && registerErrors.length > 0 && <RegisterErrors errors={registerErrors} />}
           <button
-            className="btn w-full bg-[#3B82F6] text-white opacity-100 hover:bg-[#2563eb] disabled:bg-[#3B82F6] disabled:text-white disabled:opacity-100"
-            disabled={!address || Boolean(registered.data) || register.isPending}
-            onClick={() =>
+            className={`btn w-full text-white opacity-100 disabled:text-white disabled:opacity-100 ${
+              alreadyRegistered
+                ? "border border-emerald-400/30 bg-emerald-400/15 text-emerald-100 hover:bg-emerald-400/15 disabled:bg-emerald-400/15"
+                : "bg-[#3B82F6] hover:bg-[#2563eb] disabled:bg-[#3B82F6]"
+            }`}
+            disabled={!canRegister}
+            onClick={() => {
+              setAttempted(true);
+              if (alreadyRegistered || !canRegister) return;
               register.writeContract({
                 address: CONTRACTS.agentRegistry,
                 abi: agentRegistryAbi,
                 functionName: "register"
-              })
-            }
+              });
+            }}
           >
-            Register agent
+            {register.isPending
+              ? "Confirm in wallet..."
+              : receipt.isLoading
+              ? "Registering..."
+              : receipt.isSuccess
+              ? "Registration successful"
+              : alreadyRegistered
+              ? "Agent Registered"
+              : registrationLoading
+              ? "Checking registration..."
+              : "Register agent"}
           </button>
           <TxStatus hash={register.data} error={register.error} />
+          {(registered.error || gasBalance.error) && (
+            <div className="rounded-md border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-200">
+              {registered.error && <p>Registration read failed: {getReadableTxError(registered.error)}</p>}
+              {gasBalance.error && <p>Gas balance read failed: {getReadableTxError(gasBalance.error)}</p>}
+            </div>
+          )}
         </div>
       </div>
     </section>
+  );
+}
+
+function RegisterErrors({ errors }: { errors: string[] }) {
+  return (
+    <div className="rounded-md border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
+      <p className="font-black text-white">Registration blocked</p>
+      <ul className="mt-2 space-y-1">
+        {errors.map((error) => (
+          <li key={error}>{error}</li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

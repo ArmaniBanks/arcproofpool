@@ -7,11 +7,41 @@ import { ARC_TESTNET } from "@/contracts.config";
 export function TxStatus({ hash, error }: { hash?: Hash; error?: Error | null }) {
   const receipt = useWaitForTransactionReceipt({ hash });
 
-  if (error) return <StatusLine tone="error" label={`Failed: ${error.message}`} />;
+  if (error) return <StatusLine tone="error" label={`Failed: ${getReadableTxError(error)}`} />;
   if (receipt.isLoading) return <StatusLine hash={hash} label="Pending confirmation" />;
   if (receipt.isSuccess) return <StatusLine hash={hash} label="Confirmed on Arc" />;
   if (hash) return <StatusLine hash={hash} label="Transaction submitted" />;
   return null;
+}
+
+export function getReadableTxError(error?: Error | null) {
+  if (!error) return "";
+  const message = error.message || "Unknown transaction error";
+  const lower = message.toLowerCase();
+
+  if (lower.includes("alreadyregistered") || lower.includes("already registered")) {
+    return "This wallet is already registered.";
+  }
+  if (lower.includes("user rejected") || lower.includes("user denied") || lower.includes("rejected the request")) {
+    return "Transaction rejected.";
+  }
+  if (lower.includes("insufficient funds") || lower.includes("insufficient gas")) {
+    return "Insufficient gas.";
+  }
+  if (lower.includes("wrong network") || lower.includes("chain mismatch") || lower.includes("unsupported chain")) {
+    return "Wrong network.";
+  }
+  if (lower.includes("abi") && (lower.includes("decode") || lower.includes("signature"))) {
+    return "Contract rejected the transaction. Refresh the page and check wallet status before trying again.";
+  }
+  if (lower.includes("execution reverted") || lower.includes("revert")) {
+    return message.replace(/\\n\\s*/g, " ");
+  }
+  if (lower.includes("rpc") || lower.includes("fetch") || lower.includes("request")) {
+    return `RPC error: ${message}`;
+  }
+
+  return message;
 }
 
 function StatusLine({ hash, label, tone = "success" }: { hash?: Hash; label: string; tone?: "success" | "error" }) {
