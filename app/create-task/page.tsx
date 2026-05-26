@@ -279,7 +279,7 @@ export default function CreateTaskPage() {
               Deadline date
               <input
                 className="control mt-1"
-                inputMode="numeric"
+                type="date"
                 placeholder="YYYY-MM-DD"
                 value={deadlineDate}
                 onChange={(event) => setDeadlineDate(event.target.value)}
@@ -290,7 +290,7 @@ export default function CreateTaskPage() {
               Deadline time
               <input
                 className="control mt-1"
-                inputMode="numeric"
+                type="time"
                 placeholder="HH:MM"
                 value={deadlineTime}
                 onChange={(event) => setDeadlineTime(event.target.value)}
@@ -298,7 +298,7 @@ export default function CreateTaskPage() {
               />
             </label>
             <p className="text-xs leading-5 text-zinc-500 sm:col-span-2">
-              Use future date and time. Example: 2026-05-27, 18:30
+              Pick a future date and time. Example: 2026-05-27, 18:30
             </p>
           </div>
         </div>
