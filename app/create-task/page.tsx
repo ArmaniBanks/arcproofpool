@@ -25,6 +25,7 @@ export default function CreateTaskPage() {
   const [createAttempted, setCreateAttempted] = useState(false);
   const [draftHydrated, setDraftHydrated] = useState(false);
   const [allowanceRefreshing, setAllowanceRefreshing] = useState(false);
+  const [createCheckingApproval, setCreateCheckingApproval] = useState(false);
   const [allowanceAmount, setAllowanceAmount] = useState<bigint | undefined>();
   const [allowanceReadError, setAllowanceReadError] = useState<Error | null>(null);
 
@@ -88,7 +89,7 @@ export default function CreateTaskPage() {
   ];
 
   const canApprove = approvalErrors.length === 0 && !isApproved && !allowanceRefreshing && !approve.isPending && !approveReceipt.isLoading;
-  const canCreate = createErrors.length === 0 && !create.isPending && !createReceipt.isLoading;
+  const canCreate = baseCreateErrors.length === 0 && !createCheckingApproval && !create.isPending && !createReceipt.isLoading;
   const approvalButtonText = isApproved
     ? "1. USDC approved"
     : approve.isPending || approveReceipt.isLoading
@@ -225,10 +226,17 @@ export default function CreateTaskPage() {
     }
   }, [balance, createReceipt.isSuccess]);
 
-  function submitCreate(event: FormEvent) {
+  async function submitCreate(event: FormEvent) {
     event.preventDefault();
     setCreateAttempted(true);
-    if (!canCreate) return;
+    if (baseCreateErrors.length > 0 || createCheckingApproval || create.isPending || createReceipt.isLoading) return;
+
+    setCreateCheckingApproval(true);
+    const latestAllowance = isApproved ? allowanceAmount : await readAllowance();
+    setCreateCheckingApproval(false);
+
+    if (latestAllowance === undefined || latestAllowance < rewardUnits) return;
+
     create.writeContract({
       address: CONTRACTS.proofPool,
       abi: proofPoolAbi,
@@ -327,7 +335,7 @@ export default function CreateTaskPage() {
             {approvalButtonText}
           </button>
           <button className="btn btn-primary" type="submit" disabled={!canCreate}>
-            {create.isPending || createReceipt.isLoading ? "2. Creating..." : "2. Create task"}
+            {createCheckingApproval ? "2. Checking approval..." : create.isPending || createReceipt.isLoading ? "2. Creating..." : "2. Create task"}
           </button>
         </div>
         {createAttempted && createErrors.length > 0 && <ValidationPanel title="Create blocked" errors={createErrors} />}
