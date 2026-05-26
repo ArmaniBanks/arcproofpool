@@ -16,6 +16,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <Providers>
           <Header />
+          <div className="border-b border-line bg-arc/10 px-4 py-2 text-center text-xs font-black uppercase tracking-[0.18em] text-blue-200">
+            LATEST BUILD LIVE - v4
+          </div>
           <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6">{children}</main>
           <Footer />
         </Providers>
@@ -33,7 +36,7 @@ function Footer() {
           <p className="mt-1 leading-6">
             Arc Testnet only. Uses test USDC. One wallet can register once. Use a second wallet to test proof submission.
           </p>
-          <p className="mt-3 font-mono text-[11px] text-zinc-600">Build: approval-fix-v3</p>
+          <p className="mt-3 font-mono text-[11px] text-zinc-600">Build: theme-live-v1</p>
         </div>
         <div className="flex flex-wrap gap-3">
           <Link href="/create-task" className="font-black text-blue-300 hover:text-blue-100">
