@@ -76,16 +76,21 @@ export default function CreateTaskPage() {
     isConnected && !isWrongChain && usdcBalance === undefined && "USDC balance is still loading.",
     isConnected && !isWrongChain && rewardLooksValid && usdcBalance !== undefined && !hasBalance && `Insufficient USDC balance. Wallet has ${formatUsdc(usdcBalance)} USDC.`
   ].filter(Boolean) as string[];
+  const baseCreateErrors = [...fieldErrors, ...walletErrors];
+  const approvalRequirementErrors = isApproved
+    ? []
+    : [
+        approvalStatusLoading && "USDC approval status is still loading.",
+        rewardLooksValid && !approvalStatusLoading && "USDC approval is missing. Complete Step 1 before creating the task."
+      ].filter(Boolean) as string[];
   const approvalErrors = [
     ...fieldErrors,
     ...walletErrors
   ];
   const createErrors = [
-    ...fieldErrors,
-    ...walletErrors,
-    approvalStatusLoading && !isApproved && "USDC approval status is still loading.",
-    rewardLooksValid && !approvalStatusLoading && !isApproved && "USDC approval is missing. Complete Step 1 before creating the task."
-  ].filter(Boolean) as string[];
+    ...baseCreateErrors,
+    ...approvalRequirementErrors
+  ];
 
   const canApprove = approvalErrors.length === 0 && !isApproved && !allowanceRefreshing && !approve.isPending && !approveReceipt.isLoading;
   const canCreate = createErrors.length === 0 && !create.isPending && !createReceipt.isLoading;
@@ -271,8 +276,8 @@ export default function CreateTaskPage() {
 
         <ValidationPanel
           title="Create task readiness"
-          errors={createAttempted ? createErrors : [...fieldErrors, ...walletErrors]}
-          success={fieldErrors.length === 0 && walletErrors.length === 0 ? (isApproved ? "Ready to create task." : approvalStatusLoading ? "Checking USDC approval..." : "Fields are valid. Complete USDC approval next.") : undefined}
+          errors={createAttempted ? createErrors : isApproved ? baseCreateErrors : [...baseCreateErrors, ...approvalRequirementErrors]}
+          success={baseCreateErrors.length === 0 ? (isApproved ? "Ready to create task." : approvalStatusLoading ? "Checking USDC approval..." : "Fields are valid. Complete USDC approval next.") : undefined}
         />
 
         <div className="flex flex-col gap-3 sm:flex-row">
