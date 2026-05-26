@@ -1,7 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useAccount, useChainId, useReadContract, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { useAccount, useChainId, usePublicClient, useReadContract, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
 import { ARC_TESTNET, CONTRACTS } from "@/contracts.config";
 import { erc20Abi, proofPoolAbi } from "@/lib/artifacts";
 import { formatUsdc, parseUsdc } from "@/lib/format";
@@ -25,15 +25,12 @@ export default function CreateTaskPage() {
   const [createAttempted, setCreateAttempted] = useState(false);
   const [draftHydrated, setDraftHydrated] = useState(false);
   const [allowanceRefreshing, setAllowanceRefreshing] = useState(false);
+  const [allowanceAmount, setAllowanceAmount] = useState<bigint | undefined>();
+  const [allowanceReadError, setAllowanceReadError] = useState<Error | null>(null);
 
   const rewardUnits = useMemo(() => parseUsdc(reward), [reward]);
   const isWrongChain = Boolean(isConnected && chainId !== ARC_TESTNET.id);
-  const allowance = useReadContract({
-    address: CONTRACTS.usdc,
-    abi: erc20Abi,
-    functionName: "allowance",
-    args: [address || ZERO_ADDRESS, CONTRACTS.proofPool]
-  });
+  const publicClient = usePublicClient({ chainId: ARC_TESTNET.id });
   const balance = useReadContract({
     address: CONTRACTS.usdc,
     abi: erc20Abi,
@@ -44,11 +41,9 @@ export default function CreateTaskPage() {
   const create = useWriteContract();
   const approveReceipt = useWaitForTransactionReceipt({ hash: approve.data });
   const createReceipt = useWaitForTransactionReceipt({ hash: create.data });
-  const refetchAllowance = allowance.refetch;
 
-  const allowanceAmount = allowance.data as bigint | undefined;
   const isApproved = Boolean(rewardUnits > 0n && allowanceAmount !== undefined && allowanceAmount >= rewardUnits);
-  const approvalStatusLoading = Boolean(isConnected && !isWrongChain && !isApproved && (allowance.isLoading || allowance.isRefetching || allowanceRefreshing));
+  const approvalStatusLoading = Boolean(isConnected && !isWrongChain && !isApproved && (allowanceAmount === undefined || allowanceRefreshing));
   const usdcBalance = balance.data as bigint | undefined;
   const hasBalance = usdcBalance !== undefined && usdcBalance >= rewardUnits;
   const rewardLooksValid = /^\d+(\.\d{1,6})?$/.test(reward.trim()) && rewardUnits > 0n;
@@ -94,6 +89,40 @@ export default function CreateTaskPage() {
 
   const canApprove = approvalErrors.length === 0 && !isApproved && !allowanceRefreshing && !approve.isPending && !approveReceipt.isLoading;
   const canCreate = createErrors.length === 0 && !create.isPending && !createReceipt.isLoading;
+  const approvalButtonText = isApproved
+    ? "1. USDC approved"
+    : approve.isPending || approveReceipt.isLoading
+    ? "1. Approving..."
+    : approvalStatusLoading
+    ? "1. Checking approval..."
+    : "1. Approve USDC";
+
+  const readAllowance = useCallback(async (keepRefreshing = false) => {
+    if (!address || isWrongChain || !publicClient) {
+      setAllowanceAmount(undefined);
+      return undefined;
+    }
+
+    setAllowanceRefreshing(true);
+    setAllowanceReadError(null);
+    try {
+      const value = await publicClient.readContract({
+        address: CONTRACTS.usdc,
+        abi: erc20Abi,
+        functionName: "allowance",
+        args: [address, CONTRACTS.proofPool]
+      });
+      const nextAllowance = value as bigint;
+      setAllowanceAmount(nextAllowance);
+      return nextAllowance;
+    } catch (error) {
+      const nextError = error instanceof Error ? error : new Error("Allowance read failed.");
+      setAllowanceReadError(nextError);
+      return undefined;
+    } finally {
+      if (!keepRefreshing) setAllowanceRefreshing(false);
+    }
+  }, [address, isWrongChain, publicClient]);
 
   useEffect(() => {
     try {
@@ -124,15 +153,15 @@ export default function CreateTaskPage() {
 
   useEffect(() => {
     if (address && !isWrongChain) {
-      refetchAllowance();
+      readAllowance();
     }
-  }, [address, isWrongChain, refetchAllowance, rewardUnits]);
+  }, [address, isWrongChain, readAllowance, rewardUnits]);
 
   useEffect(() => {
     if (!address || isWrongChain) return;
 
     function refetchOnFocus() {
-      refetchAllowance();
+      readAllowance();
     }
 
     window.addEventListener("focus", refetchOnFocus);
@@ -142,7 +171,7 @@ export default function CreateTaskPage() {
       window.removeEventListener("focus", refetchOnFocus);
       document.removeEventListener("visibilitychange", refetchOnFocus);
     };
-  }, [address, isWrongChain, refetchAllowance]);
+  }, [address, isWrongChain, readAllowance]);
 
   useEffect(() => {
     if (!approveReceipt.isSuccess || !address || isWrongChain || rewardUnits <= 0n) return;
@@ -153,8 +182,7 @@ export default function CreateTaskPage() {
     async function pollAllowance(attempt = 0) {
       setAllowanceRefreshing(true);
       try {
-        const result = await refetchAllowance();
-        const nextAllowance = result.data as bigint | undefined;
+        const nextAllowance = await readAllowance(true);
         if (cancelled) return;
         if (nextAllowance !== undefined && nextAllowance >= rewardUnits) {
           setCreateAttempted(false);
@@ -179,9 +207,10 @@ export default function CreateTaskPage() {
 
     return () => {
       cancelled = true;
+      setAllowanceRefreshing(false);
       if (timer) clearTimeout(timer);
     };
-  }, [address, approveReceipt.isSuccess, isWrongChain, refetchAllowance, rewardUnits]);
+  }, [address, approveReceipt.isSuccess, isWrongChain, readAllowance, rewardUnits]);
 
   useEffect(() => {
     if (isApproved) {
@@ -295,7 +324,7 @@ export default function CreateTaskPage() {
               });
             }}
           >
-            {approve.isPending || approveReceipt.isLoading || allowanceRefreshing ? "1. Approving..." : isApproved ? "1. USDC approved" : "1. Approve USDC"}
+            {approvalButtonText}
           </button>
           <button className="btn btn-primary" type="submit" disabled={!canCreate}>
             {create.isPending || createReceipt.isLoading ? "2. Creating..." : "2. Create task"}
@@ -304,9 +333,9 @@ export default function CreateTaskPage() {
         {createAttempted && createErrors.length > 0 && <ValidationPanel title="Create blocked" errors={createErrors} />}
         <TxStatus hash={approve.data} error={approve.error} />
         <TxStatus hash={create.data} error={create.error} />
-        {(allowance.error || balance.error) && (
+        {(allowanceReadError || balance.error) && (
           <div className="rounded-md border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-200">
-            {allowance.error && <p>Allowance read failed: {getReadableTxError(allowance.error)}</p>}
+            {allowanceReadError && <p>Allowance read failed: {getReadableTxError(allowanceReadError)}</p>}
             {balance.error && <p>USDC balance read failed: {getReadableTxError(balance.error)}</p>}
           </div>
         )}
