@@ -1,7 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useAccount, useChainId, useReadContract, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { useAccount, useChainId, usePublicClient, useReadContract, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
 import { ARC_TESTNET, CONTRACTS } from "@/contracts.config";
 import { erc20Abi, proofPoolAbi } from "@/lib/artifacts";
 import { formatUsdc, parseUsdc } from "@/lib/format";
@@ -9,6 +9,9 @@ import { FaucetHelper } from "@/components/FaucetHelper";
 import { getReadableTxError, TxStatus } from "@/components/TxStatus";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const DRAFT_STORAGE_KEY = "arcproofpool:create-task-draft";
+const DATE_FORMAT = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_FORMAT = /^\d{2}:\d{2}$/;
 
 export default function CreateTaskPage() {
   const { address, isConnected } = useAccount();
@@ -20,16 +23,14 @@ export default function CreateTaskPage() {
   const [deadlineDate, setDeadlineDate] = useState("");
   const [deadlineTime, setDeadlineTime] = useState("");
   const [createAttempted, setCreateAttempted] = useState(false);
-  const [approveAttempted, setApproveAttempted] = useState(false);
+  const [draftHydrated, setDraftHydrated] = useState(false);
+  const [allowanceRefreshing, setAllowanceRefreshing] = useState(false);
+  const [allowanceAmount, setAllowanceAmount] = useState<bigint | undefined>();
+  const [allowanceReadError, setAllowanceReadError] = useState<Error | null>(null);
 
   const rewardUnits = useMemo(() => parseUsdc(reward), [reward]);
   const isWrongChain = Boolean(isConnected && chainId !== ARC_TESTNET.id);
-  const allowance = useReadContract({
-    address: CONTRACTS.usdc,
-    abi: erc20Abi,
-    functionName: "allowance",
-    args: [address || ZERO_ADDRESS, CONTRACTS.proofPool]
-  });
+  const publicClient = usePublicClient({ chainId: ARC_TESTNET.id });
   const balance = useReadContract({
     address: CONTRACTS.usdc,
     abi: erc20Abi,
@@ -41,12 +42,14 @@ export default function CreateTaskPage() {
   const approveReceipt = useWaitForTransactionReceipt({ hash: approve.data });
   const createReceipt = useWaitForTransactionReceipt({ hash: create.data });
 
-  const hasAllowance = (allowance.data as bigint | undefined) !== undefined && (allowance.data as bigint) >= rewardUnits;
+  const isApproved = Boolean(rewardUnits > 0n && allowanceAmount !== undefined && allowanceAmount >= rewardUnits);
+  const approvalStatusLoading = Boolean(isConnected && !isWrongChain && !isApproved && (allowanceAmount === undefined || allowanceRefreshing));
   const usdcBalance = balance.data as bigint | undefined;
   const hasBalance = usdcBalance !== undefined && usdcBalance >= rewardUnits;
   const rewardLooksValid = /^\d+(\.\d{1,6})?$/.test(reward.trim()) && rewardUnits > 0n;
-  const deadlineDateTime = deadlineDate && deadlineTime ? new Date(`${deadlineDate}T${deadlineTime}`) : null;
-  const deadlineMs = deadlineDateTime?.getTime();
+  const deadlineDateValid = isValidDateInput(deadlineDate);
+  const deadlineTimeValid = isValidTimeInput(deadlineTime);
+  const deadlineMs = deadlineDateValid && deadlineTimeValid ? getDeadlineMs(deadlineDate, deadlineTime) : undefined;
   const deadlineIsValid = Boolean(deadlineMs && Number.isFinite(deadlineMs) && deadlineMs > Date.now());
   const deadlineSeconds = deadlineIsValid ? BigInt(Math.floor((deadlineMs as number) / 1000)) : 0n;
 
@@ -56,9 +59,11 @@ export default function CreateTaskPage() {
     !criteria.trim() && "Acceptance criteria are required.",
     !reward.trim() && "Reward is required.",
     reward.trim() && !rewardLooksValid && "Reward must be greater than 0 with up to 6 USDC decimals.",
-    !deadlineDate && "Deadline date is required.",
-    !deadlineTime && "Deadline time is required.",
-    deadlineDate && deadlineTime && !deadlineIsValid && "Deadline must be a valid future date and time."
+    !deadlineDate.trim() && "Deadline date is required.",
+    !deadlineTime.trim() && "Deadline time is required.",
+    deadlineDate.trim() && !deadlineDateValid && "Deadline date must be YYYY-MM-DD",
+    deadlineTime.trim() && !deadlineTimeValid && "Deadline time must be HH:MM",
+    deadlineDateValid && deadlineTimeValid && !deadlineIsValid && "Deadline must be in the future"
   ].filter(Boolean) as string[];
   const walletErrors = [
     !isConnected && "Connect a wallet before creating a task.",
@@ -66,28 +71,157 @@ export default function CreateTaskPage() {
     isConnected && !isWrongChain && usdcBalance === undefined && "USDC balance is still loading.",
     isConnected && !isWrongChain && rewardLooksValid && usdcBalance !== undefined && !hasBalance && `Insufficient USDC balance. Wallet has ${formatUsdc(usdcBalance)} USDC.`
   ].filter(Boolean) as string[];
+  const baseCreateErrors = [...fieldErrors, ...walletErrors];
+  const approvalRequirementErrors = isApproved
+    ? []
+    : [
+        approvalStatusLoading && "USDC approval status is still loading.",
+        rewardLooksValid && !approvalStatusLoading && "USDC approval is missing. Complete Step 1 before creating the task."
+      ].filter(Boolean) as string[];
   const approvalErrors = [
     ...fieldErrors,
     ...walletErrors
   ];
   const createErrors = [
-    ...fieldErrors,
-    ...walletErrors,
-    rewardLooksValid && !hasAllowance && "USDC approval is missing. Complete Step 1 before creating the task."
-  ].filter(Boolean) as string[];
+    ...baseCreateErrors,
+    ...approvalRequirementErrors
+  ];
 
-  const canApprove = approvalErrors.length === 0 && !approve.isPending && !approveReceipt.isLoading;
+  const canApprove = approvalErrors.length === 0 && !isApproved && !allowanceRefreshing && !approve.isPending && !approveReceipt.isLoading;
   const canCreate = createErrors.length === 0 && !create.isPending && !createReceipt.isLoading;
+  const approvalButtonText = isApproved
+    ? "1. USDC approved"
+    : approve.isPending || approveReceipt.isLoading
+    ? "1. Approving..."
+    : approvalStatusLoading
+    ? "1. Checking approval..."
+    : "1. Approve USDC";
+
+  const readAllowance = useCallback(async (keepRefreshing = false) => {
+    if (!address || isWrongChain || !publicClient) {
+      setAllowanceAmount(undefined);
+      return undefined;
+    }
+
+    setAllowanceRefreshing(true);
+    setAllowanceReadError(null);
+    try {
+      const value = await publicClient.readContract({
+        address: CONTRACTS.usdc,
+        abi: erc20Abi,
+        functionName: "allowance",
+        args: [address, CONTRACTS.proofPool]
+      });
+      const nextAllowance = value as bigint;
+      setAllowanceAmount(nextAllowance);
+      return nextAllowance;
+    } catch (error) {
+      const nextError = error instanceof Error ? error : new Error("Allowance read failed.");
+      setAllowanceReadError(nextError);
+      return undefined;
+    } finally {
+      if (!keepRefreshing) setAllowanceRefreshing(false);
+    }
+  }, [address, isWrongChain, publicClient]);
 
   useEffect(() => {
-    if (approveReceipt.isSuccess) {
-      allowance.refetch();
+    try {
+      const stored = window.localStorage.getItem(DRAFT_STORAGE_KEY);
+      if (!stored) {
+        setDraftHydrated(true);
+        return;
+      }
+      const draft = JSON.parse(stored) as Partial<Record<"title" | "description" | "criteria" | "reward" | "deadlineDate" | "deadlineTime", string>>;
+      if (typeof draft.title === "string") setTitle(draft.title);
+      if (typeof draft.description === "string") setDescription(draft.description);
+      if (typeof draft.criteria === "string") setCriteria(draft.criteria);
+      if (typeof draft.reward === "string") setReward(draft.reward);
+      if (typeof draft.deadlineDate === "string") setDeadlineDate(draft.deadlineDate);
+      if (typeof draft.deadlineTime === "string") setDeadlineTime(draft.deadlineTime);
+    } catch {
+      window.localStorage.removeItem(DRAFT_STORAGE_KEY);
+    } finally {
+      setDraftHydrated(true);
     }
-  }, [allowance, approveReceipt.isSuccess]);
+  }, []);
+
+  useEffect(() => {
+    if (!draftHydrated) return;
+    const draft = { title, description, criteria, reward, deadlineDate, deadlineTime };
+    window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+  }, [criteria, deadlineDate, deadlineTime, description, draftHydrated, reward, title]);
+
+  useEffect(() => {
+    if (address && !isWrongChain) {
+      readAllowance();
+    }
+  }, [address, isWrongChain, readAllowance, rewardUnits]);
+
+  useEffect(() => {
+    if (!address || isWrongChain) return;
+
+    function refetchOnFocus() {
+      readAllowance();
+    }
+
+    window.addEventListener("focus", refetchOnFocus);
+    document.addEventListener("visibilitychange", refetchOnFocus);
+
+    return () => {
+      window.removeEventListener("focus", refetchOnFocus);
+      document.removeEventListener("visibilitychange", refetchOnFocus);
+    };
+  }, [address, isWrongChain, readAllowance]);
+
+  useEffect(() => {
+    if (!approveReceipt.isSuccess || !address || isWrongChain || rewardUnits <= 0n) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function pollAllowance(attempt = 0) {
+      setAllowanceRefreshing(true);
+      try {
+        const nextAllowance = await readAllowance(true);
+        if (cancelled) return;
+        if (nextAllowance !== undefined && nextAllowance >= rewardUnits) {
+          setCreateAttempted(false);
+          setAllowanceRefreshing(false);
+          return;
+        }
+      } catch {
+        if (cancelled) return;
+      }
+
+      if (attempt >= 14) {
+        setAllowanceRefreshing(false);
+        return;
+      }
+
+      timer = setTimeout(() => {
+        pollAllowance(attempt + 1);
+      }, 1_500);
+    }
+
+    pollAllowance();
+
+    return () => {
+      cancelled = true;
+      setAllowanceRefreshing(false);
+      if (timer) clearTimeout(timer);
+    };
+  }, [address, approveReceipt.isSuccess, isWrongChain, readAllowance, rewardUnits]);
+
+  useEffect(() => {
+    if (isApproved) {
+      setAllowanceRefreshing(false);
+    }
+  }, [isApproved]);
 
   useEffect(() => {
     if (createReceipt.isSuccess) {
       balance.refetch();
+      window.localStorage.removeItem(DRAFT_STORAGE_KEY);
     }
   }, [balance, createReceipt.isSuccess]);
 
@@ -133,24 +267,46 @@ export default function CreateTaskPage() {
               <input className="control mt-1" inputMode="decimal" value={reward} onChange={(event) => setReward(event.target.value)} required />
             </label>
             {address && usdcBalance !== undefined && <p className="text-xs text-zinc-500">Wallet balance: {formatUsdc(usdcBalance)} USDC</p>}
+            {address && allowanceAmount !== undefined && rewardLooksValid && (
+              <p className={`text-xs ${isApproved ? "text-blue-200" : "text-zinc-500"}`}>
+                Current allowance: {formatUsdc(allowanceAmount)} USDC
+              </p>
+            )}
             <FaucetHelper />
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block text-sm font-semibold">
               Deadline date
-              <input className="control mt-1" type="date" value={deadlineDate} onChange={(event) => setDeadlineDate(event.target.value)} required />
+              <input
+                className="control mt-1"
+                inputMode="numeric"
+                placeholder="YYYY-MM-DD"
+                value={deadlineDate}
+                onChange={(event) => setDeadlineDate(event.target.value)}
+                required
+              />
             </label>
             <label className="block text-sm font-semibold">
               Deadline time
-              <input className="control mt-1" type="time" value={deadlineTime} onChange={(event) => setDeadlineTime(event.target.value)} required />
+              <input
+                className="control mt-1"
+                inputMode="numeric"
+                placeholder="HH:MM"
+                value={deadlineTime}
+                onChange={(event) => setDeadlineTime(event.target.value)}
+                required
+              />
             </label>
+            <p className="text-xs leading-5 text-zinc-500 sm:col-span-2">
+              Use future date and time. Example: 2026-05-27, 18:30
+            </p>
           </div>
         </div>
 
         <ValidationPanel
           title="Create task readiness"
-          errors={createAttempted ? createErrors : [...fieldErrors, ...walletErrors]}
-          success={fieldErrors.length === 0 && walletErrors.length === 0 ? (hasAllowance ? "Ready to create task." : "Fields are valid. Complete USDC approval next.") : undefined}
+          errors={createAttempted ? createErrors : isApproved ? baseCreateErrors : [...baseCreateErrors, ...approvalRequirementErrors]}
+          success={baseCreateErrors.length === 0 ? (isApproved ? "Ready to create task." : approvalStatusLoading ? "Checking USDC approval..." : "Fields are valid. Complete USDC approval next.") : undefined}
         />
 
         <div className="flex flex-col gap-3 sm:flex-row">
@@ -159,7 +315,6 @@ export default function CreateTaskPage() {
             type="button"
             disabled={!canApprove}
             onClick={() => {
-              setApproveAttempted(true);
               if (!canApprove) return;
               approve.writeContract({
                 address: CONTRACTS.usdc,
@@ -169,25 +324,45 @@ export default function CreateTaskPage() {
               });
             }}
           >
-            {approve.isPending || approveReceipt.isLoading ? "1. Approving..." : approveReceipt.isSuccess || hasAllowance ? "1. USDC approved" : "1. Approve USDC"}
+            {approvalButtonText}
           </button>
           <button className="btn btn-primary" type="submit" disabled={!canCreate}>
             {create.isPending || createReceipt.isLoading ? "2. Creating..." : "2. Create task"}
           </button>
         </div>
-        {approveAttempted && approvalErrors.length > 0 && <ValidationPanel title="Approval blocked" errors={approvalErrors} />}
         {createAttempted && createErrors.length > 0 && <ValidationPanel title="Create blocked" errors={createErrors} />}
         <TxStatus hash={approve.data} error={approve.error} />
         <TxStatus hash={create.data} error={create.error} />
-        {(allowance.error || balance.error) && (
+        {(allowanceReadError || balance.error) && (
           <div className="rounded-md border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-200">
-            {allowance.error && <p>Allowance read failed: {getReadableTxError(allowance.error)}</p>}
+            {allowanceReadError && <p>Allowance read failed: {getReadableTxError(allowanceReadError)}</p>}
             {balance.error && <p>USDC balance read failed: {getReadableTxError(balance.error)}</p>}
           </div>
         )}
       </form>
     </section>
   );
+}
+
+function isValidDateInput(value: string) {
+  const trimmed = value.trim();
+  if (!DATE_FORMAT.test(trimmed)) return false;
+  const [year, month, day] = trimmed.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+function isValidTimeInput(value: string) {
+  const trimmed = value.trim();
+  if (!TIME_FORMAT.test(trimmed)) return false;
+  const [hour, minute] = trimmed.split(":").map(Number);
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+}
+
+function getDeadlineMs(dateValue: string, timeValue: string) {
+  const [year, month, day] = dateValue.trim().split("-").map(Number);
+  const [hour, minute] = timeValue.trim().split(":").map(Number);
+  return new Date(year, month - 1, day, hour, minute, 0).getTime();
 }
 
 function ValidationPanel({ title, errors, success }: { title: string; errors: string[]; success?: string }) {
