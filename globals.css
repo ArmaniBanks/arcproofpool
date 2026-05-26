@@ -1,0 +1,170 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+:root.light {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(59, 130, 246, 0.16), transparent 28rem),
+    radial-gradient(circle at 90% 10%, rgba(59, 130, 246, 0.08), transparent 24rem),
+    #0a0a0a;
+  color: #ffffff;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  min-height: 100vh;
+}
+
+.light body {
+  background:
+    radial-gradient(circle at 20% 0%, rgba(59, 130, 246, 0.13), transparent 28rem),
+    radial-gradient(circle at 90% 10%, rgba(59, 130, 246, 0.08), transparent 24rem),
+    #f8fafc;
+  color: #0f172a;
+}
+
+.light header,
+.light footer {
+  border-color: #dbe4f0 !important;
+  background: rgba(248, 250, 252, 0.9) !important;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.panel {
+  border: 1px solid #1a1a1a;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018));
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.26);
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.panel:hover {
+  border-color: rgba(59, 130, 246, 0.48);
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.075), rgba(255, 255, 255, 0.02));
+}
+
+.light .panel {
+  border-color: #dbe4f0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 252, 0.86));
+  box-shadow: 0 20px 70px rgba(15, 23, 42, 0.08);
+}
+
+.light .panel:hover {
+  border-color: rgba(59, 130, 246, 0.42);
+  background: linear-gradient(180deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.9));
+}
+
+.control {
+  border: 1px solid #1f2937;
+  background: #0f0f0f;
+  border-radius: 6px;
+  color: #ffffff;
+  padding: 0.8rem 0.9rem;
+  width: 100%;
+  outline: none;
+}
+
+.control:focus {
+  border-color: #3B82F6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.16);
+}
+
+.control::placeholder {
+  color: #64748b;
+}
+
+.light .control {
+  border-color: #dbe4f0;
+  background: #ffffff;
+  color: #0f172a;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  min-height: 2.75rem;
+  padding: 0.7rem 1rem;
+  font-weight: 650;
+  transition: 120ms ease;
+}
+
+.btn-primary {
+  background: #3B82F6;
+  color: white;
+  box-shadow: 0 16px 42px rgba(59, 130, 246, 0.24);
+}
+
+.btn-primary:hover {
+  background: #2563eb;
+}
+
+.btn-secondary {
+  border: 1px solid #1f2937;
+  background: #101010;
+  color: #ffffff;
+}
+
+.btn-secondary:hover {
+  border-color: rgba(59, 130, 246, 0.52);
+}
+
+.light .btn-secondary {
+  border-color: #dbe4f0;
+  background: #ffffff;
+  color: #0f172a;
+}
+
+.btn-danger {
+  background: #ef4444;
+  color: white;
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.light .border-line {
+  border-color: #dbe4f0 !important;
+}
+
+.light .bg-black\/20,
+.light .bg-white\/\[0\.025\],
+.light .bg-white\/\[0\.02\],
+.light .bg-white\/\[0\.03\] {
+  background-color: rgba(255, 255, 255, 0.72) !important;
+}
+
+.light .text-white {
+  color: #0f172a !important;
+}
+
+.light .text-zinc-300,
+.light .text-zinc-400 {
+  color: #334155 !important;
+}
+
+.light .text-zinc-500,
+.light .text-zinc-600 {
+  color: #64748b !important;
+}
+
+.light .text-blue-100,
+.light .text-blue-200,
+.light .text-blue-300 {
+  color: #2563eb !important;
+}
